@@ -23,6 +23,7 @@ from visualizer import Visualizer
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_URDF = ROOT / "SO101_6DOF.urdf"
+DEFAULT_CALIBRATION_DIR = ROOT / "calibration" / "so_follower"
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,8 +40,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--calibration-dir",
         type=Path,
-        default=None,
-        help="Directory with {robot-id}.json. Default: ~/.cache/huggingface/lerobot/calibration/robots/so_follower/",
+        default=DEFAULT_CALIBRATION_DIR,
+        help="Directory with {robot-id}.json. Default: ./calibration/so_follower",
     )
     p.add_argument("--dof-mode", type=int, default=7, choices=(6, 7))
     return p.parse_args()
@@ -71,8 +72,7 @@ def main() -> None:
     print(f"HOME TCP x={xyz[0]:.1f} y={xyz[1]:.1f} z={xyz[2]:.1f} mm")
     print(f"HOME RPY r={rpy[0]:.1f} p={rpy[1]:.1f} y={rpy[2]:.1f} deg")
     print(f"HW       port={args.port}  id={args.robot_id}  dof={args.dof_mode}")
-    if args.calibration_dir is not None:
-        print(f"calib    {args.calibration_dir}")
+    print(f"calib    {args.calibration_dir}")
 
     viz = Visualizer(kin, open_browser=not args.no_open)
     viz.display(q)
