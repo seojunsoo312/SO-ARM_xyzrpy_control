@@ -1,0 +1,10 @@
+# Virtual pendant (GUI + Meshcat). Pinocchio is not on PyPI as `pinocchio`.
+# conda: conda install -c conda-forge pinocchio
+# pip:   pip install pin
+numpy
+meshcat
+customtkinter
+# pin / pinocchio  (pulls in coal / hpp-fcl)
+
+# Real hardware (Connect): install lerobot with Feetech extra in the same env.
+# Not listed here — lazy-imported from lerobot.robots.so_follower.
