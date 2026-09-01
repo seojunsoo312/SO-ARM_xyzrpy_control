@@ -4,6 +4,7 @@
 numpy
 meshcat
 customtkinter
+# conda install -c conda-forge pinocchio
 # pin / pinocchio  (pulls in coal / hpp-fcl)
 
 # Real hardware (Connect): install lerobot with Feetech extra in the same env.
