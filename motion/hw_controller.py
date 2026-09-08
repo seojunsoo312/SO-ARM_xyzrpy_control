@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from robot_kinematics import (
+from motion.robot_kinematics import (
     ARM_JOINT_NAMES,
     GRIPPER_JOINT,
     LEROBOT_FROM_URDF,
@@ -19,6 +19,10 @@ STS3215_RESOLUTION = 4096
 GRIPPER_MID = 50.0
 DEFAULT_PORT = "/dev/so101_follower"
 DEFAULT_ROBOT_ID = "follower"
+SO_FOLLOWER_NAME = "so_follower"
+BUNDLED_CALIBRATION_DIR = (
+    Path(__file__).resolve().parent.parent / "pendant" / "calibration" / "so_follower"
+)
 
 
 def grip_user_to_100(user_deg: float) -> float:
@@ -29,6 +33,25 @@ def grip_user_to_100(user_deg: float) -> float:
 def grip_100_to_user(grip_100: float) -> float:
     """LeRobot gripper 0–100 → pendant S7 user-deg."""
     return float(np.clip(grip_100, 0.0, 100.0)) - GRIPPER_MID
+
+
+def hf_calibration_dir() -> Path:
+    """Same directory lerobot-calibrate uses for so101_follower."""
+    from lerobot.utils.constants import HF_LEROBOT_CALIBRATION, ROBOTS
+
+    return HF_LEROBOT_CALIBRATION / ROBOTS / SO_FOLLOWER_NAME
+
+
+def resolve_calibration_dir(explicit: Path | None, robot_id: str) -> Path:
+    """Prefer Hugging Face cache (lerobot-calibrate), else the repo JSON."""
+    if explicit is not None:
+        return Path(explicit)
+    cache_dir = hf_calibration_dir()
+    if (cache_dir / f"{robot_id}.json").is_file():
+        return cache_dir
+    if (BUNDLED_CALIBRATION_DIR / f"{robot_id}.json").is_file():
+        return BUNDLED_CALIBRATION_DIR
+    return cache_dir
 
 
 def _enter_offsets_deg(calibration: dict) -> dict[str, float]:
@@ -81,6 +104,7 @@ class Hardware:
         from lerobot.robots.so_follower import SO101FollowerConfig, SOFollower
 
         self.disconnect()
+        calib_dir = resolve_calibration_dir(self.calibration_dir, self.robot_id)
         kwargs: dict = {
             "port": self.port,
             "id": self.robot_id,
@@ -88,14 +112,14 @@ class Hardware:
             "dof_mode": self.dof_mode,
             "max_relative_target": None,
             "cameras": {},
+            "calibration_dir": calib_dir,
         }
-        if self.calibration_dir is not None:
-            kwargs["calibration_dir"] = self.calibration_dir
         robot = SOFollower(SO101FollowerConfig(**kwargs))
+        print(f"calibration {robot.calibration_fpath}")
         if not robot.calibration:
             raise RuntimeError(
                 f"No calibration at {robot.calibration_fpath}. "
-                "Use an existing follower.json (do not re-calibrate here)."
+                "Run lerobot-calibrate (same path) or pass --calibration-dir."
             )
         missing = [
             LEROBOT_FROM_URDF[n] for n in URDF_JOINT_NAMES if LEROBOT_FROM_URDF[n] not in robot.calibration
@@ -113,20 +137,14 @@ class Hardware:
             raise
 
         try:
-            # configure() re-enables torque on exit; hold pose only after q_cmd = q_meas.
+            # configure() re-enables torque on exit; hold the measured pose, not a stale goal.
             with self._lock:
                 robot.bus.disable_torque()
             self._enter_off = _enter_offsets_deg(robot.calibration)
-            with self._lock:
-                obs = robot.get_observation()
-            q = kin.q_from_deg(self._bus_to_user(obs))
-            action = self._user_to_bus(kin.joints_deg(q))
-            with self._lock:
-                robot.send_action(action)
-                robot.bus.enable_torque()
             self._robot = robot
-            self._torque = True
-            return q
+            self._torque = False
+            self.hold_present()
+            return self.read_q(kin)
         except Exception:
             self._robot = None
             self._torque = False
@@ -166,12 +184,45 @@ class Hardware:
             robot.bus.disable_torque()
 
     def enable_torque(self) -> None:
+        """Hold the current encoder pose. Do not enable onto the last Goal_Position."""
+        if self._robot is None:
+            return
+        self.hold_present()
+
+    def hold_present(self) -> None:
+        """Torque ON at Present_Position.
+
+        STS3215 ignores Goal_Position while torque is off. write-then-enable
+        therefore snaps back to the last accepted goal (wrist-down → pops up).
+        Enable each motor, then immediately write that motor's present ticks.
+        """
         robot = self._robot
         if robot is None:
-            return
+            raise RuntimeError("hardware not connected")
         with self._lock:
-            robot.bus.enable_torque()
+            present = robot.bus.sync_read("Present_Position", normalize=False)
+            if not self._torque:
+                self._widen_position_limits(robot, present)
+            for motor, ticks in present.items():
+                robot.bus.enable_torque(motor)
+                robot.bus.write("Goal_Position", motor, int(ticks), normalize=False)
         self._torque = True
+
+    @staticmethod
+    def _widen_position_limits(robot, present: dict[str, int]) -> None:
+        """If a joint was hand-guided past recorded ROM, let firmware accept that tick."""
+        for motor, ticks in present.items():
+            cal = robot.calibration.get(motor) if robot.calibration else None
+            if cal is None:
+                continue
+            t = int(ticks)
+            lo, hi = int(cal.range_min), int(cal.range_max)
+            if lo <= t <= hi:
+                continue
+            new_lo = max(0, min(lo, t))
+            new_hi = min(STS3215_RESOLUTION - 1, max(hi, t))
+            robot.bus.write("Min_Position_Limit", motor, new_lo, normalize=False)
+            robot.bus.write("Max_Position_Limit", motor, new_hi, normalize=False)
 
     def read_q(self, kin: RobotKinematics) -> np.ndarray:
         robot = self._robot

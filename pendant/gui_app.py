@@ -2,18 +2,54 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PROJECT = Path(__file__).resolve().parent.parent
+if str(_PROJECT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT))
+
 import tkinter as tk
 from tkinter import messagebox
 
 import customtkinter as ctk
 import numpy as np
 
-from controller import GOTO_DURATION_S, GRIPPER_VEL_UNIT_S, JOG_VEL_MPS, JOINT_VEL_DEG_S, Controller
-from hw_controller import grip_100_to_user, grip_user_to_100
-from robot_kinematics import GRIPPER_JOINT, LEROBOT_FROM_URDF, URDF_JOINT_NAMES
+from motion.controller import (
+    GOTO_DURATION_S,
+    GRIPPER_VEL_UNIT_S,
+    JOG_VEL_MAX_MPS,
+    JOG_VEL_MIN_MPS,
+    JOG_VEL_MPS,
+    JOINT_VEL_DEG_S,
+    ROT_FRAME_BASE,
+    ROT_FRAME_TCP,
+    Controller,
+)
+from motion.hw_controller import grip_100_to_user, grip_user_to_100
+from motion.robot_kinematics import GRIPPER_JOINT, LEROBOT_FROM_URDF, URDF_JOINT_NAMES
 from visualizer import Visualizer
 
 DISPLAY_MS = 33
+
+# Meshcat triad: X red, Y green, Z blue. TCP 모드 RPY = TCP 축.
+_RPY_COLOR_TCP = {
+    "Roll": "#E53935",
+    "Pitch": "#43A047",
+    "Yaw": "#1E88E8",
+    "roll": "#E53935",
+    "pitch": "#43A047",
+    "yaw": "#1E88E8",
+}
+# Base 모드: 초기자세에서 보인 TCP 색 대응 (Roll→파랑, Pitch→빨강, Yaw→초록).
+_RPY_COLOR_BASE = {
+    "Roll": "#1E88E8",
+    "Pitch": "#E53935",
+    "Yaw": "#43A047",
+    "roll": "#1E88E8",
+    "pitch": "#E53935",
+    "yaw": "#43A047",
+}
 
 
 class PendantGui:
@@ -29,7 +65,7 @@ class PendantGui:
             text=(
                 f"Hold +/− to jog. Joint {JOINT_VEL_DEG_S:.0f}°/s · "
                 f"gripper {GRIPPER_VEL_UNIT_S:.0f}/s · "
-                f"TCP {JOG_VEL_MPS * 1000:.0f} mm/s · go-to {GOTO_DURATION_S:.1f}s. "
+                f"TCP jog 5–15 mm/s · go-to {GOTO_DURATION_S:.1f}s. "
                 f"Meshcat: {meshcat_url or 'open the printed URL'}"
             ),
             anchor="w",
@@ -42,16 +78,26 @@ class PendantGui:
             root, text="err:  (virtual)", font=ctk.CTkFont(family="monospace", size=14), anchor="w"
         )
         self.mode_label = ctk.CTkLabel(root, text="mode: virtual", font=ctk.CTkFont(family="monospace"), anchor="w")
+        self.rot_frame_label = ctk.CTkLabel(
+            root,
+            text="rot: base (월드 고정축)",
+            font=ctk.CTkFont(family="monospace", size=14),
+            anchor="w",
+        )
         self.fault_label = ctk.CTkLabel(root, text="", text_color="#f87171", anchor="w")
         self.tcp_label.pack(anchor="w", padx=12)
         self.rpy_label.pack(anchor="w", padx=12)
         self.err_label.pack(anchor="w", padx=12)
         self.mode_label.pack(anchor="w", padx=12)
+        self.rot_frame_label.pack(anchor="w", padx=12)
         self.fault_label.pack(anchor="w", padx=12, pady=(0, 4))
 
         bar = ctk.CTkFrame(root, fg_color="transparent")
         bar.pack(side="bottom", fill="x", padx=12, pady=(4, 12))
         ctk.CTkButton(bar, text="HOME", width=80, command=self._ctrl.home).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(bar, text="초기자세", width=90, command=self._goto_init_pose).pack(
+            side="left", padx=(0, 8)
+        )
         ctk.CTkButton(bar, text="Stop", width=80, command=self._ctrl.stop_all).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
             bar,
@@ -128,9 +174,23 @@ class PendantGui:
         self._cart_row(right, "X", "x")
         self._cart_row(right, "Y", "y")
         self._cart_row(right, "Z", "z")
-        self._cart_row(right, "Roll", "wx")
-        self._cart_row(right, "Pitch", "wy")
-        self._cart_row(right, "Yaw", "wz")
+
+        rot_bar = ctk.CTkFrame(right, fg_color="transparent")
+        rot_bar.pack(fill="x", padx=6, pady=(10, 2))
+        ctk.CTkLabel(rot_bar, text="RPY jog frame", anchor="w").pack(side="left", padx=(4, 8))
+        self._rot_frame_seg = ctk.CTkSegmentedButton(
+            rot_bar,
+            values=["base", "TCP"],
+            command=self._on_rot_frame,
+            width=160,
+        )
+        self._rot_frame_seg.set("base")
+        self._rot_frame_seg.pack(side="left")
+
+        self._rpy_jog_labels: dict[str, ctk.CTkLabel] = {}
+        self._cart_row(right, "Roll", "wx", color=_RPY_COLOR_BASE["Roll"], store_label=True)
+        self._cart_row(right, "Pitch", "wy", color=_RPY_COLOR_BASE["Pitch"], store_label=True)
+        self._cart_row(right, "Yaw", "wz", color=_RPY_COLOR_BASE["Yaw"], store_label=True)
 
         grip = ctk.CTkFrame(right)
         grip.pack(fill="x", pady=(12, 3), padx=6)
@@ -150,8 +210,11 @@ class PendantGui:
             width=8,
         )
 
-        ctk.CTkLabel(right, text="Go-to TCP (mm / deg)", anchor="w").pack(anchor="w", padx=8, pady=(12, 4))
+        ctk.CTkLabel(right, text="Go-to TCP (mm / deg) · base 기준", anchor="w").pack(
+            anchor="w", padx=8, pady=(12, 4)
+        )
         self.ee_entries: dict[str, ctk.CTkEntry] = {}
+        self._rpy_ee_labels: dict[str, ctk.CTkLabel] = {}
         for key, label in (
             ("x", "x mm"),
             ("y", "y mm"),
@@ -162,7 +225,13 @@ class PendantGui:
         ):
             row = ctk.CTkFrame(right)
             row.pack(fill="x", pady=2, padx=6)
-            ctk.CTkLabel(row, text=label, width=70, anchor="w").pack(side="left")
+            label_kw: dict = {"text": label, "width": 70, "anchor": "w"}
+            if key in _RPY_COLOR_BASE:
+                label_kw["text_color"] = _RPY_COLOR_BASE[key]
+            lab = ctk.CTkLabel(row, **label_kw)
+            lab.pack(side="left")
+            if key in _RPY_COLOR_BASE:
+                self._rpy_ee_labels[key] = lab
             ent = ctk.CTkEntry(row, width=90)
             ent.insert(0, "0")
             ent.pack(side="left", padx=6)
@@ -172,15 +241,48 @@ class PendantGui:
         ctk.CTkButton(btn, text="Use current", width=110, command=self._fill_ee).pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Move EE", width=110, command=self._move_ee).pack(side="left")
 
+        vel = ctk.CTkFrame(right)
+        vel.pack(fill="x", padx=6, pady=(4, 8))
+        self._tcp_vel_label = ctk.CTkLabel(
+            vel,
+            text=f"TCP jog  {JOG_VEL_MPS * 1000:.0f} mm/s",
+            anchor="w",
+        )
+        self._tcp_vel_label.pack(anchor="w", padx=4, pady=(6, 0))
+        self._tcp_vel_slider = ctk.CTkSlider(
+            vel,
+            from_=JOG_VEL_MIN_MPS * 1000.0,
+            to=JOG_VEL_MAX_MPS * 1000.0,
+            number_of_steps=10,
+            command=self._on_tcp_jog_speed,
+        )
+        self._tcp_vel_slider.set(JOG_VEL_MPS * 1000.0)
+        self._tcp_vel_slider.pack(fill="x", padx=4, pady=(4, 8))
+        self._ctrl.set_tcp_jog_mm_s(JOG_VEL_MPS * 1000.0)
+
         self.root.bind_all("<ButtonRelease-1>", self._on_global_release, add="+")
         self._fill_joints()
         self._fill_ee()
         self._schedule_display()
 
-    def _cart_row(self, parent: ctk.CTkFrame, title: str, axis: str) -> None:
+    def _cart_row(
+        self,
+        parent: ctk.CTkFrame,
+        title: str,
+        axis: str,
+        *,
+        color: str | None = None,
+        store_label: bool = False,
+    ) -> None:
         row = ctk.CTkFrame(parent)
         row.pack(fill="x", pady=3, padx=6)
-        ctk.CTkLabel(row, text=title, width=60, anchor="w").pack(side="left", padx=(4, 8))
+        label_kw: dict = {"text": title, "width": 60, "anchor": "w"}
+        if color is not None:
+            label_kw["text_color"] = color
+        lab = ctk.CTkLabel(row, **label_kw)
+        lab.pack(side="left", padx=(4, 8))
+        if store_label:
+            self._rpy_jog_labels[title] = lab
         self._hold_button(
             row,
             "−",
@@ -202,10 +304,12 @@ class PendantGui:
         btn.bind("<ButtonRelease-1>", lambda _e: on_release())
 
     def _on_global_release(self, event: tk.Event) -> None:
-        if getattr(event.widget, "_is_jog", None):
-            return
+        w = event.widget
+        while w is not None:
+            if getattr(w, "_is_jog", None):
+                return
+            w = getattr(w, "master", None)
         # Mouse-up outside a jog button stops jog, but must not cancel go-to.
-        # CTkButton command also fires on ButtonRelease, then this bind_all runs.
         self._ctrl.clear_jog()
 
     def _joint_display(self, name: str, user_deg: float) -> float:
@@ -246,6 +350,19 @@ class PendantGui:
             return
         self._ctrl.start_joint_goto(target)
 
+    def _goto_init_pose(self) -> None:
+        from motion.robot_kinematics import INIT_POSE_JOINTS_DEG
+
+        for name in URDF_JOINT_NAMES:
+            shown = (
+                grip_user_to_100(INIT_POSE_JOINTS_DEG[name])
+                if name == GRIPPER_JOINT
+                else INIT_POSE_JOINTS_DEG[name]
+            )
+            self.joint_entries[name].delete(0, "end")
+            self.joint_entries[name].insert(0, f"{shown:.2f}")
+        self._ctrl.init_pose()
+
     def _move_ee(self) -> None:
         try:
             xyz = np.array([float(self.ee_entries[k].get()) for k in ("x", "y", "z")], dtype=float)
@@ -257,6 +374,35 @@ class PendantGui:
             messagebox.showerror("Go-to", "TCP values must be numbers.")
             return
         self._ctrl.start_ee_goto(xyz, rpy)
+
+    def _on_tcp_jog_speed(self, value: float) -> None:
+        mm = int(round(float(value)))
+        mm = max(5, min(15, mm))
+        self._ctrl.set_tcp_jog_mm_s(mm)
+        self._tcp_vel_label.configure(text=f"TCP jog  {mm} mm/s")
+
+    def _on_rot_frame(self, value: str) -> None:
+        frame = ROT_FRAME_TCP if str(value).upper() == "TCP" else ROT_FRAME_BASE
+        self._ctrl.set_rot_frame(frame)
+        self._apply_rpy_label_colors(frame)
+        self._update_rot_frame_label(frame)
+
+    def _rpy_colors(self, frame: str) -> dict[str, str]:
+        return _RPY_COLOR_TCP if frame == ROT_FRAME_TCP else _RPY_COLOR_BASE
+
+    def _apply_rpy_label_colors(self, frame: str) -> None:
+        colors = self._rpy_colors(frame)
+        for title, lab in self._rpy_jog_labels.items():
+            lab.configure(text_color=colors[title])
+        for key, lab in self._rpy_ee_labels.items():
+            lab.configure(text_color=colors[key])
+
+    def _update_rot_frame_label(self, frame: str) -> None:
+        if frame == ROT_FRAME_TCP:
+            text = "rot: TCP (그리퍼 로컬 X/Y/Z · 빨/초/파)"
+        else:
+            text = "rot: base (월드 고정축)"
+        self.rot_frame_label.configure(text=text)
 
     def _toggle_connect(self) -> None:
         st = self._ctrl.snapshot()
@@ -281,16 +427,16 @@ class PendantGui:
         self._viz.display(st.q)
         xyz = st.pose.xyz_mm
         rpy = st.pose.rpy_deg
-        self.tcp_label.configure(text=f"TCP:  x={xyz[0]:7.1f}  y={xyz[1]:7.1f}  z={xyz[2]:7.1f}  mm")
-        self.rpy_label.configure(text=f"RPY:  r={rpy[0]:7.1f}  p={rpy[1]:7.1f}  y={rpy[2]:7.1f}  deg")
+        self.tcp_label.configure(text=f"TCP:  x={xyz[0]:8.2f}  y={xyz[1]:8.2f}  z={xyz[2]:8.2f}  mm")
+        self.rpy_label.configure(text=f"RPY:  r={rpy[0]:8.2f}  p={rpy[1]:8.2f}  y={rpy[2]:8.2f}  deg")
         if st.ee_err_mm is None or st.err_xyz_mm is None:
             self.err_label.configure(text="err:  (virtual)")
         else:
             d = st.err_xyz_mm
             self.err_label.configure(
                 text=(
-                    f"err:  |Δ|={st.ee_err_mm:6.1f}  "
-                    f"Δx={d[0]:+6.1f}  Δy={d[1]:+6.1f}  Δz={d[2]:+6.1f}  mm"
+                    f"err:  |Δ|={st.ee_err_mm:7.2f}  "
+                    f"Δx={d[0]:+7.2f}  Δy={d[1]:+7.2f}  Δz={d[2]:+7.2f}  mm"
                 )
             )
         torque = "torque on" if st.torque else "torque off"
@@ -301,12 +447,17 @@ class PendantGui:
             self.mode_label.configure(text="mode: virtual")
             if self.connect_btn.cget("state") != "disabled":
                 self.connect_btn.configure(text="Connect")
+        self._update_rot_frame_label(st.rot_frame)
+        seg_val = "TCP" if st.rot_frame == ROT_FRAME_TCP else "base"
+        if self._rot_frame_seg.get() != seg_val:
+            self._rot_frame_seg.set(seg_val)
+            self._apply_rpy_label_colors(st.rot_frame)
         self.fault_label.configure(text=st.fault)
         for name, deg in st.joints_deg.items():
             alias = LEROBOT_FROM_URDF[name]
             shown = self._joint_display(name, deg)
             unit = "" if name == GRIPPER_JOINT else "°"
-            self.joint_labels[name].configure(text=f"{name} ({alias}): {shown:7.1f}{unit}")
+            self.joint_labels[name].configure(text=f"{name} ({alias}): {shown:8.2f}{unit}")
         self.root.after(DISPLAY_MS, self._schedule_display)
 
     def on_close(self) -> None:

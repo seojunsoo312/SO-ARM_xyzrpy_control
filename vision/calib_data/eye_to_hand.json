@@ -1,0 +1,85 @@
+{
+  "frame": "T_base_cam",
+  "gripper_frame": "tcp",
+  "unit": "mm",
+  "method": "charuco_ransac_pnp_handeye_park_eye_to_hand",
+  "intrinsics": "/home/junsoo/Project/vision/calib_data/intrinsics.json",
+  "n_samples_detected": 43,
+  "n_samples": 42,
+  "rejected_samples": [
+    "20260907_123953_184.png"
+  ],
+  "squares": [
+    7,
+    5
+  ],
+  "square_mm": 20.0,
+  "marker_mm": 15.0,
+  "min_corners": 16,
+  "rotate_180": true,
+  "reprojection_rms_px_mean": 0.2862180277358654,
+  "reprojection_rms_px_max": 0.5283729434013367,
+  "tcp_board_translation_residual_mm_mean": 6.646612945909955,
+  "tcp_board_translation_residual_mm_max": 12.391424412731183,
+  "tcp_board_rotation_residual_deg_mean": 1.5261057781861198,
+  "tcp_board_rotation_residual_deg_max": 2.763939930716845,
+  "leave_one_out_translation_change_mm_max": 1.2559928274590102,
+  "leave_one_out_rotation_change_deg_max": 0.16989865928640932,
+  "T_base_cam": [
+    [
+      -0.9999410277380312,
+      0.0052943082494036516,
+      -0.009482159372751464,
+      -16.18439176466493
+    ],
+    [
+      0.004764750798491044,
+      0.9984736002551139,
+      0.05502514646431977,
+      -217.18730900397796
+    ],
+    [
+      0.009759005893954616,
+      0.05497672138052483,
+      -0.9984399440678493,
+      349.277098930145
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "T_tcp_board": [
+    [
+      0.9991705693903848,
+      0.004120951286110767,
+      -0.04051161592175886,
+      -68.9839920504211
+    ],
+    [
+      0.00769049739519553,
+      -0.9960593547559682,
+      0.08835506806595543,
+      36.231850529905294
+    ],
+    [
+      -0.03998786708376785,
+      -0.08859333814470838,
+      -0.9952648848032714,
+      13.554745144226231
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "t_base_cam_mm": [
+    -16.18439176466493,
+    -217.18730900397796,
+    349.277098930145
+  ]
+}

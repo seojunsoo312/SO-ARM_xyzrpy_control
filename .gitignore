@@ -1,7 +1,28 @@
-__pycache__/
+# Python
+**/__pycache__/
 *.py[cod]
-.Python
+*.egg-info/
 .venv/
 venv/
-*.egg-info/
+
+# YOLO / training artifacts
+yolo/datasets/
+yolo/weights/
+yolo/runs/
+yolo/*.pt
+yolo/mobile_sam.pt
+
+# Vision capture dumps (keep json calib results)
+vision/calib_data/**/*.png
+vision/calib_data/**/*.jpg
+vision/calib_data/**/*.jpeg
+
+# Point clouds / local dumps
+**/*.ply
+**/runs/
+
+# Editor / OS
 .DS_Store
+.idea/
+.vscode/
+*.swp

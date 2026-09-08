@@ -56,15 +56,27 @@ JOINT_SIGN = {
     "S1": -1.0,
     "S2": 1.0,
     "S3": 1.0,
-    "S4": 1.0,
+    "S4": -1.0,  # elbow_roll: pendant + vs CAD was inverted
     "S5": 1.0,
     "S6": -1.0,
     "S7": -1.0,  # GUI + opens (CAD toward GRIPPER_OPEN_CAD_DEG)
 }
 
 # User-space HOME (deg). 0 = JOINT_ZERO_OFFSET_DEG in the URDF.
+# Calib Enter at the L-pose makes user 0 that pose; do not add an extra S5 shift.
 # Gripper HOME user 0 = pendant 50 (half-open); CAD is midway to GRIPPER_OPEN_CAD_DEG.
 HOME_JOINTS_DEG = {name: 0.0 for name in URDF_JOINT_NAMES}
+
+# Pendant "초기자세" — 작업 시작용. S7 user 0 = GUI 0–100 의 50.
+INIT_POSE_JOINTS_DEG = {
+    "S1": 0.0,
+    "S2": -40.0,
+    "S3": 40.0,
+    "S4": 0.0,
+    "S5": -90.0,
+    "S6": 0.0,
+    "S7": 0.0,
+}
 
 DEG2RAD = np.pi / 180.0
 RAD2DEG = 180.0 / np.pi
@@ -89,11 +101,11 @@ ADJACENT_JOINT_CLEARANCE_M = 0.04
 IK_ITERS = 12
 MAX_CART_STEP_M = 0.006
 MAX_HOLD_CORR_M = 0.0015
-HOLD_DEADBAND_M = 0.0005
+HOLD_DEADBAND_M = 0.002  # 2 mm. Tight hold on unused axes made S1/S4 hunt.
 TILT_DEADBAND_RAD = 0.004
 MAX_DQ_ITER_RAD = 1.5 * DEG2RAD
 MAX_DQ_FRAME_RAD = 5.0 * DEG2RAD
-DLS_LAMBDA = 1.0  # mm-equivalent
+DLS_LAMBDA = 2.0  # mm-equivalent. Higher → less nullspace chatter (S1/S4 on X).
 DLS_LAMBDA_PRI = 0.4
 TILT_MM_PER_RAD = 80.0
 TILT_WEIGHT = 1.0
@@ -474,20 +486,17 @@ class RobotKinematics:
                         max_dq=MAX_DQ_ITER_RAD,
                     )
             else:
-                hold = ~cmd
-                pri_rows = []
-                pri_err = []
-                if np.any(hold):
-                    pri_rows.append(jac_p[hold])
-                    pri_err.append(err_p_mm[hold])
-                if j_extra is not None:
-                    pri_rows.append(j_extra)
-                    pri_err.append(e_extra)
-                j_pri = np.vstack(pri_rows) if pri_rows else np.zeros((0, n_arm))
-                e_pri = np.concatenate(pri_err) if pri_err else np.zeros(0)
-                j_sec = jac_p[cmd] if np.any(cmd) else np.zeros((0, n_arm))
-                e_sec = err_p_mm[cmd] if np.any(cmd) else np.zeros(0)
-                dq = _hierarchical_dq(j_pri, e_pri, j_sec, e_sec, n_joints=n_arm, max_dq=MAX_DQ_ITER_RAD)
+                # One DLS on XYZ. Hold-first hierarchy leaves Z in a tiny leftover
+                # of Jxy (table-fold pose: S2/S3 busy holding XY) so +Z looks dead.
+                if j_extra is None:
+                    dq = _dls_dq(jac_p, err_p_mm, damping=DLS_LAMBDA, max_dq=MAX_DQ_ITER_RAD)
+                else:
+                    dq = _dls_dq(
+                        np.vstack([jac_p, j_extra]),
+                        np.concatenate([err_p_mm, e_extra]),
+                        damping=DLS_LAMBDA,
+                        max_dq=MAX_DQ_ITER_RAD,
+                    )
             q_arm = q_arm + dq
             if float(np.max(np.abs(q_arm - q_start))) >= MAX_DQ_FRAME_RAD:
                 break

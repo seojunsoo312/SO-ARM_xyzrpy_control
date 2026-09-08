@@ -9,31 +9,39 @@ from dataclasses import dataclass
 import numpy as np
 import pinocchio as pin
 
-from hw_controller import Hardware
-from robot_kinematics import (
+from motion.hw_controller import Hardware
+from motion.pose_server import POSE_URL, PoseServer
+from motion.robot_kinematics import (
     DEG2RAD,
     GRIPPER_CLOSED_CAD_DEG,
     GRIPPER_JOINT,
     GRIPPER_OPEN_CAD_DEG,
     HOME_JOINTS_DEG,
+    INIT_POSE_JOINTS_DEG,
     JOINT_SIGN,
+    TCP_FRAME,
     URDF_JOINT_NAMES,
     RobotKinematics,
     TcpPose,
     rpy_deg_to_rotmat,
-    tilt_weight_from_delta,
 )
 
 FPS = 30
 JOINT_VEL_DEG_S = 20.0
 GRIPPER_VEL_UNIT_S = 40.0
-JOG_VEL_MPS = 0.04
+JOG_VEL_MPS = 0.010  # default TCP jog; GUI slider 5–15 mm/s
+JOG_VEL_MIN_MPS = 0.005
+JOG_VEL_MAX_MPS = 0.015
 JOG_ROT_RAD_S = 20.0 * DEG2RAD
-MAX_TARGET_LEAD_M = 0.02
+MAX_TARGET_LEAD_M = 0.008  # 8 mm vs measured TCP (real). Sub-tick goals never move STS3215.
+# q_send = (1-β) q_prev + β q_ik. Smaller β = less shake, more lag.
+CART_IK_BLEND = 0.4
 GOTO_DURATION_S = 2.5
 Z_FLOOR_M = 0.0
 
 CART_AXES = ("x", "y", "z", "wx", "wy", "wz")
+ROT_FRAME_BASE = "base"
+ROT_FRAME_TCP = "tcp"
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,7 @@ class PendantState:
     pose: TcpPose
     fault: str
     mode: str
+    rot_frame: str
     connected: bool
     torque: bool
     ee_err_mm: float | None
@@ -65,11 +74,14 @@ class Controller:
         self._fault = ""
         self._goto: dict | None = None
         self._mode = "virtual"
+        self._rot_frame = ROT_FRAME_BASE
         self._q_meas: np.ndarray | None = None
         self._pose_meas: TcpPose | None = None
         self._ee_err_mm: float | None = None
         self._err_xyz_mm: np.ndarray | None = None
         self._hw_hold = False
+        self._pose_server: PoseServer | None = None
+        self._jog_vel_mps = float(JOG_VEL_MPS)
 
     def start(self) -> None:
         if self._thread is not None:
@@ -77,12 +89,23 @@ class Controller:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        if self._pose_server is None:
+            self._pose_server = PoseServer(self.handeye_payload)
+            try:
+                self._pose_server.start()
+                print(f"hand-eye pose  {POSE_URL}")
+            except OSError as exc:
+                self._pose_server = None
+                print(f"hand-eye pose server failed ({exc})")
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
+        if self._pose_server is not None:
+            self._pose_server.stop()
+            self._pose_server = None
         self.disconnect()
 
     def set_joint_jog(self, joint: str, sign: int) -> None:
@@ -95,6 +118,34 @@ class Controller:
             self._joint_jog[joint] = int(np.sign(sign))
             if sign != 0:
                 self._reset_cart_targets()
+
+    def set_tcp_jog_mm_s(self, mm_s: float) -> None:
+        lo = JOG_VEL_MIN_MPS * 1000.0
+        hi = JOG_VEL_MAX_MPS * 1000.0
+        vel = float(np.clip(mm_s, lo, hi)) / 1000.0
+        with self._lock:
+            self._jog_vel_mps = vel
+
+    def tcp_jog_mm_s(self) -> float:
+        with self._lock:
+            return self._jog_vel_mps * 1000.0
+
+    def set_rot_frame(self, frame: str) -> None:
+        """RPY jog frame: 'base' (world-fixed) or 'tcp' (tool-local)."""
+        key = str(frame).strip().lower()
+        if key in {"base", "world"}:
+            key = ROT_FRAME_BASE
+        elif key in {"tcp", "tool", "local"}:
+            key = ROT_FRAME_TCP
+        else:
+            raise ValueError(f"rot frame must be base|tcp, got {frame!r}")
+        with self._lock:
+            self._rot_frame = key
+            self._reset_cart_targets()
+
+    def rot_frame(self) -> str:
+        with self._lock:
+            return self._rot_frame
 
     def set_cart_jog(self, axis: str, sign: int) -> None:
         if axis not in self._cart_jog:
@@ -123,6 +174,10 @@ class Controller:
 
     def home(self) -> None:
         self.start_joint_goto(dict(HOME_JOINTS_DEG))
+
+    def init_pose(self) -> None:
+        """작업 시작 자세 (펜던트 초기자세 버튼)."""
+        self.start_joint_goto(dict(INIT_POSE_JOINTS_DEG))
 
     def connect(self) -> None:
         if self._hw is None:
@@ -234,6 +289,7 @@ class Controller:
             pose = self._pose
             fault = self._fault
             mode = self._mode
+            rot_frame = self._rot_frame
             err = self._ee_err_mm
             err_xyz = None if self._err_xyz_mm is None else self._err_xyz_mm.copy()
         hw = self._hw
@@ -245,11 +301,38 @@ class Controller:
             pose=pose,
             fault=fault,
             mode=mode,
+            rot_frame=rot_frame,
             connected=connected,
             torque=torque,
             ee_err_mm=err,
             err_xyz_mm=err_xyz,
         )
+
+    def handeye_payload(self) -> dict:
+        """Measured TCP when the bus is up; commanded pose only as a fallback."""
+        with self._lock:
+            q = self._q_meas.copy() if self._q_meas is not None else self._q.copy()
+            pose = self._pose_meas if self._pose_meas is not None else self._pose
+            mode = self._mode
+            fault = self._fault
+        hw = self._hw
+        connected = bool(hw is not None and hw.is_connected)
+        torque = bool(hw is not None and hw.torque_enabled)
+        T = np.eye(4)
+        T[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        T[:3, 3] = np.asarray(pose.xyz_mm, dtype=float)
+        return {
+            "ok": bool(connected and torque and mode == "real"),
+            "connected": connected,
+            "torque": torque,
+            "mode": mode,
+            "fault": fault,
+            "gripper_frame": TCP_FRAME,
+            "joints_deg": {k: float(v) for k, v in self._kin.joints_deg(q).items()},
+            "tcp_xyz_mm": np.asarray(pose.xyz_mm, dtype=float).tolist(),
+            "tcp_rpy_deg": np.asarray(pose.rpy_deg, dtype=float).tolist(),
+            "T_base_tcp": T.tolist(),
+        }
 
     def _frozen_unlocked(self) -> bool:
         """True while connecting, or after E-stop (bus up, torque off)."""
@@ -274,20 +357,21 @@ class Controller:
         with self._lock:
             frozen = self._frozen_unlocked()
             q_now = self._q.copy()
+            z_now = float(self._pose.xyz_m[2])
         if frozen:
             return False
         q = self._kin.clamp_q(q)
-        # Block only *entering* collision. Connect can land in a pose the meshes
-        # still flag (closed gripper, elbow fold); freezing there makes all jog fail.
-        if self._kin.in_collision(q) and not self._kin.in_collision(q_now):
+        pose = self._kin.forward_tcp(q)
+        # Already-folded poses overlap L1/L2 vs L4. Allow a +Z step even if that
+        # "enters" a mesh pair; still block drops that newly collide.
+        entering = self._kin.in_collision(q) and not self._kin.in_collision(q_now)
+        lifting = float(pose.xyz_m[2]) + 1e-4 >= z_now
+        if entering and not lifting:
             with self._lock:
                 self._fault = "collision — step ignored"
                 if rewind_cart:
                     self._reset_cart_targets()
             return False
-        pose = self._kin.forward_tcp(q)
-        with self._lock:
-            z_now = float(self._pose.xyz_m[2])
         if pose.xyz_m[2] < Z_FLOOR_M and z_now >= Z_FLOOR_M:
             with self._lock:
                 self._fault = "floor — step ignored"
@@ -403,13 +487,22 @@ class Controller:
         translating = any(cart_jog[k] for k in ("x", "y", "z"))
         rotating = any(cart_jog[k] for k in ("wx", "wy", "wz"))
         with self._lock:
+            jog_vel = float(self._jog_vel_mps)
+            meas_xyz = (
+                None
+                if self._mode != "real" or self._pose_meas is None
+                else self._pose_meas.xyz_m.copy()
+            )
             if self._target_xyz is None or self._target_rot is None:
                 self._target_xyz = pose.xyz_m.copy()
                 self._target_rot = pose.rotation.copy()
-            self._target_xyz = self._target_xyz + JOG_VEL_MPS * dt * np.array(
+            self._target_xyz = self._target_xyz + jog_vel * dt * np.array(
                 [cart_jog["x"], cart_jog["y"], cart_jog["z"]], dtype=float
             )
-            lead = self._target_xyz - pose.xyz_m
+            # Cap vs the arm, not vs q_cmd. IK must keep accumulating on q_cmd
+            # or each frame's joint goal stays < 1 Feetech tick and nothing moves.
+            ref = meas_xyz if meas_xyz is not None else pose.xyz_m
+            lead = self._target_xyz - ref
             cmd = np.array(
                 [cart_jog["x"] != 0, cart_jog["y"] != 0, cart_jog["z"] != 0],
                 dtype=bool,
@@ -418,12 +511,17 @@ class Controller:
                 lead_cmd = np.where(cmd, lead, 0.0)
                 nlead = float(np.linalg.norm(lead_cmd))
                 if nlead > MAX_TARGET_LEAD_M:
-                    self._target_xyz[cmd] = pose.xyz_m[cmd] + lead[cmd] * (MAX_TARGET_LEAD_M / nlead)
+                    self._target_xyz[cmd] = ref[cmd] + lead[cmd] * (MAX_TARGET_LEAD_M / nlead)
             if rotating:
                 w = JOG_ROT_RAD_S * dt * np.array(
                     [cart_jog["wx"], cart_jog["wy"], cart_jog["wz"]], dtype=float
                 )
-                self._target_rot = pin.exp3(w) @ self._target_rot
+                if self._rot_frame == ROT_FRAME_TCP:
+                    # Body / TCP-local: Roll→TCP X, Pitch→TCP Y, Yaw→TCP Z.
+                    self._target_rot = self._target_rot @ pin.exp3(w)
+                else:
+                    # Base / world-fixed axes.
+                    self._target_rot = pin.exp3(w) @ self._target_rot
             xyz = self._target_xyz.copy()
             rot = self._target_rot.copy()
 
@@ -432,16 +530,14 @@ class Controller:
             if translating
             else None
         )
-        cmd_delta = np.array(
-            [float(cart_jog["x"]), float(cart_jog["y"]), float(cart_jog["z"])], dtype=float
-        )
-        ori_w = 1.0 if rotating else tilt_weight_from_delta(cmd_delta)
-        q_next = self._kin.servo_toward(
+        q_ik = self._kin.servo_toward(
             q,
             xyz,
-            R_ref=rot,
+            R_ref=rot if rotating else None,
             cmd_mask=cmd_mask,
-            ori_weight=ori_w,
+            ori_weight=1.0 if rotating else 0.0,
         )
+        # Spec: smooth the command. Raw IK nullspace (S1↔S4 on X) ticks the bus.
+        q_next = (1.0 - CART_IK_BLEND) * q + CART_IK_BLEND * q_ik
         if not self._commit(q_next, rewind_cart=True):
             return

@@ -4,26 +4,31 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+PROJECT = ROOT.parent
+if str(PROJECT) not in sys.path:
+    sys.path.insert(0, str(PROJECT))
 
 import customtkinter as ctk
 import numpy as np
 
-from controller import Controller
 from gui_app import PendantGui
-from hw_controller import DEFAULT_PORT, DEFAULT_ROBOT_ID, Hardware
-from robot_kinematics import (
+from motion import (
+    DEFAULT_PORT,
+    DEFAULT_ROBOT_ID,
+    DEFAULT_URDF,
     EE_FRAME,
     TCP_FRAME,
     TCP_OFFSET_IN_L6,
     URDF_JOINT_NAMES,
+    Controller,
+    Hardware,
     RobotKinematics,
 )
 from visualizer import Visualizer
-
-ROOT = Path(__file__).resolve().parent
-DEFAULT_URDF = ROOT / "SO101_6DOF.urdf"
-DEFAULT_CALIBRATION_DIR = ROOT / "calibration" / "so_follower"
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,10 +45,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--calibration-dir",
         type=Path,
-        default=DEFAULT_CALIBRATION_DIR,
-        help="Directory with {robot-id}.json. Default: ./calibration/so_follower",
+        default=None,
+        help=(
+            "Directory with {robot-id}.json. Default: lerobot-calibrate cache "
+            "(~/.cache/huggingface/lerobot/calibration/robots/so_follower), "
+            "then ./calibration/so_follower"
+        ),
     )
     p.add_argument("--dof-mode", type=int, default=7, choices=(6, 7))
+    p.add_argument(
+        "--grasp",
+        action="store_true",
+        help="물체 집기 teach 창을 같은 Meshcat에 연다",
+    )
     return p.parse_args()
 
 
@@ -72,7 +86,9 @@ def main() -> None:
     print(f"HOME TCP x={xyz[0]:.1f} y={xyz[1]:.1f} z={xyz[2]:.1f} mm")
     print(f"HOME RPY r={rpy[0]:.1f} p={rpy[1]:.1f} y={rpy[2]:.1f} deg")
     print(f"HW       port={args.port}  id={args.robot_id}  dof={args.dof_mode}")
-    print(f"calib    {args.calibration_dir}")
+    print(
+        f"calib    {args.calibration_dir or 'LeRobot cache (same as lerobot-calibrate), else ./calibration/so_follower'}"
+    )
 
     viz = Visualizer(kin, open_browser=not args.no_open)
     viz.display(q)
@@ -91,6 +107,12 @@ def main() -> None:
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
     PendantGui(root, ctrl, viz, meshcat_url=url)
+    if args.grasp:
+        from yolo.teach_grasp import attach_teach_window
+
+        teach = attach_teach_window(root, viz, meshcat_url=url, controller=ctrl)
+        if teach is not None:
+            print("Teach    물체 집기 창 (같은 Meshcat, →P/→G 이동)")
     root.mainloop()
 
 

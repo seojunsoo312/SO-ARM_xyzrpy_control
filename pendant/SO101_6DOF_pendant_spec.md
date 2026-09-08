@@ -5,7 +5,7 @@
 본 프로젝트는 6자유도(6-DOF) 로봇팔인 SO101_6DOF (SO-101 기반, `elbow_roll` 모터 추가)을 제어하기 위한 GUI 기반의 독립형 티칭 펜던트 소프트웨어를 개발하는 것이다. 무거운 ROS 2 생태계를 배제하고, 순수 파이썬 환경에서 조그(Jog) 제어와 디지털 트윈(가상 시뮬레이션)을 구현한다.
 
 - 팔 관절 6축 + 그리퍼 1축 (서보 총 7개). 카르테시안 IK는 팔 6축만 사용하고, 그리퍼는 독립 축이다.
-- UI / 기구학 / 하드웨어 / **뷰어**를 모듈로 분리한다. GUI는 속도·목표 포즈 명령만 넣고, 제어 루프는 관절각 `q`와 끝단 상태만 돌려준다. IK는 뷰어 안에 두지 않는다.
+- UI / 기구학 / 하드웨어 / **뷰어**를 모듈로 분리한다. IK·시리얼·제어 루프는 프로젝트 루트 `motion/` 에 두고, 이 폴더는 GUI(`gui_app.py`, `visualizer.py`)와 URDF만 둔다. GUI는 속도·목표 포즈 명령만 넣고, 제어 루프는 관절각 `q`와 끝단 상태만 돌려준다. IK는 뷰어 안에 두지 않는다.
 - 가상 모드에서는 로봇 없이 3D 뷰만 동작해야 한다. 실물 모드는 기존 LeRobot Feetech 버스를 감싸서 사용하며, Feetech 시리얼 프로토콜을 새로 구현하지 않는다.
 - **3D의 역할은 티칭 입력이 아니라 XYZ/RPY 디버그다.** 조그·go-to 후 TCP가 시킨 방향으로 갔는지, FK와 GUI 숫자가 맞는지 눈으로 확인한다. **첫 구현에 Meshcat 3D를 넣는다** (별도 브라우저 창). GUI와 한 창으로 합칠지, 기즈모로 집을지는 **후순위**이지, 3D 자체를 미루는 것이 아니다. 계약은 `Visualizer.display(q)`만 고정한다.
 
@@ -48,9 +48,9 @@ LeRobot 워크스페이스에서 실행하는 경우 `uv run` / 기존 `lerobot`
 ### 3.2 모듈 경계 (필수)
 
 ```text
-GUI  ──cmd──►  Controller  ──q──►  Visualizer (디버그, 별도 창 OK)
-                    │
-                    └──q──►  Hardware (Real 모드만)
+GUI (pendant/)  ──cmd──►  motion.Controller  ──q──►  Visualizer
+                                          │
+                                          └──q──►  motion.Hardware (Real 모드만)
 ```
 
 * `gui_app.py`: 위젯과 이벤트. 로봇/Pinocchio를 import하지 않는 것을 목표로 한다. 불가피하면 얇은 콜백만.
@@ -200,17 +200,17 @@ DLS 튜닝 시작점(예제에서 검증됨, 6축에 맞게 재조정 가능): `
 ## 7. 예상 산출물 (파일 구조)
 
 ```text
-SO101_6DOF_pendant/
-├── main.py                 # 진입점. 스레드 기동, CLI (port, urdf, tcp, dof-mode)
+pendant/
+├── main.py                 # 진입점. 스레드 기동, CLI
 ├── gui_app.py              # CustomTkinter. 명령만 생산, 상태만 표시
-├── controller.py           # 30 Hz 루프. 조그/go-to/안전/모드. q 소유
-├── robot_kinematics.py     # Pinocchio FK/J/DLS, TCP, 리밋
-├── hw_controller.py        # SOFollower 래퍼, bus↔URDF 오프셋, 토크
 ├── visualizer.py           # display(q) — Meshcat 구현
-├── SO101_6DOF.urdf              # (제공) 6-DOF + 메시
+├── SO101_6DOF.urdf         # 6-DOF + 메시
 ├── meshes/                 # URDF가 참조하는 STL/DAE (있으면)
-└── requirements.txt        # pin, customtkinter, meshcat, numpy
+└── calibration/            # Feetech JSON
+
+motion/                     # IK, 시리얼, 제어 루프 (이 폴더 밖)
 ```
+
 
 LeRobot 저장소 안에 둘 경우 경로는 `examples/SO101_6DOF_pendant/` 도 허용한다. 그 경우 `hw_controller`는 `lerobot.robots.so_follower`를 import한다.
 

@@ -1,0 +1,4 @@
+# torch / torchvision 는 Jetson aarch64 휠을 쓴다. pip PyPI 본체를 쓰지 말 것.
+#   bash yolo/setup.sh
+ultralytics>=8.3.0
+open3d>=0.18.0

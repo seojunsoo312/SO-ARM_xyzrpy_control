@@ -1,0 +1,18 @@
+# 등록에 쓸 CAD. 파일은 이 폴더에 두고 이름만 바꾼다.
+# 코드에 부품 파일명을 넣지 말 것.
+mesh: bracket_4035.stl
+unit: mm
+class: bracket
+
+# 시뮬 배치 (베이스 mm/deg). pick 변환에는 안 씀.
+place:
+  xyz_mm: [200, 0, 2]
+  rpy_deg: [180, 0, 0]
+
+# 집기 (CAD 축 mm/deg). T_base_grasp = T_base_cad @ T_cad_grasp
+# 숫자는 python yolo/teach_grasp.py 에서 보면서 고친다.
+grasp:
+  xyz_mm: [20, 0, 1]
+  rpy_deg: [180, 0, 0]
+  pre_grasp_mm: 45
+  gripper: 50
