@@ -77,6 +77,7 @@ YOLOv8-Pose + PnP 는 폐기한다. 모서리 키포인트 라벨·별도 학습
 
 - 책상 RANSAC = 바닥 제거, 작업 공간 높이 범위.
 - 카메라 프레임 고정. `p_base = T_base_cam * p_cam`. `apply_T` 는 `vision.transforms` 만.
+- 프로젝트 베이스 = URDF 월드의 `Rz(180°)` (`motion/base_frame.py`). 조그·place·손눈·`--base` 숫자가 이 프레임.
 - 인식은 `yolo/`, 조그는 펜던트. 한 창에 넣지 않는다.
 - 집기는 pre-grasp (목표보다 Z+40–50 mm) 후 하강.
 - 등록 입력은 **선택한 인스턴스 점군만**.
@@ -87,7 +88,7 @@ YOLOv8-Pose + PnP 는 폐기한다. 모서리 키포인트 라벨·별도 학습
 
 reference 없이 “얼마나 돌아갔는지”는 정의되지 않는다.
 
-- CAD 점군: 모델 프레임, 자세는 항등 (축이 yaw=0).
+- CAD 점군: 모델 프레임( `model.yaml` 의 `mesh_rpy` 적용 후), 자세는 항등 (축이 yaw=0).
 - ROI 점군: 카메라에 보이는 현재 형상.
 - FPFH+RANSAC 의 [R \mid t] = CAD 축을 관측에 겹치려면 필요한 변환.
 - xyzrpy 는 그 R, t 를 베이스(또는 카메라)에서 푼 값.

@@ -23,6 +23,7 @@ from yolo.depth_cloud import (
 )
 
 SLICE_MM = 6.0
+MASK_PLANE_MM = 2.0
 MIN_SLICE_POINTS = 20
 
 
@@ -155,9 +156,10 @@ def collect_instances(
                 roi & (depth > Z_MIN_MM) & (depth < Z_MAX_MM)
             )
         )
-        # 박스만 쓸 때는 책상 4mm 제거. 마스크는 이미 물체라서 얇은 브래킷까지 지우지 않는다.
-        if plane is not None and not use_mask:
-            roi = roi & plane_foreground_mask(depth, K, plane, height_mm=plane_mm)
+        # 박스: --plane-mm (기본 4). 마스크: 2mm. ㄴ 바닥(~2mm)은 남기고 책상만 자른다.
+        if plane is not None:
+            cut_mm = MASK_PLANE_MM if use_mask else float(plane_mm)
+            roi = roi & plane_foreground_mask(depth, K, plane, height_mm=cut_mm)
         roi = largest_component(roi)
         xyz, rgb = points_from_mask(depth, K, roi, bgr=bgr, stride=stride)
         if in_base and len(xyz):

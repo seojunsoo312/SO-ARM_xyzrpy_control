@@ -16,14 +16,20 @@ import customtkinter as ctk
 import numpy as np
 
 from motion.controller import (
-    GOTO_DURATION_S,
+    DEFAULT_ARM_TORQUE_PCT,
+    DEFAULT_GRIPPER_TORQUE_PCT,
     GRIPPER_VEL_UNIT_S,
+    JOG_ROT_DEG_S,
+    JOG_ROT_MAX_DEG_S,
+    JOG_ROT_MIN_DEG_S,
     JOG_VEL_MAX_MPS,
     JOG_VEL_MIN_MPS,
     JOG_VEL_MPS,
     JOINT_VEL_DEG_S,
     ROT_FRAME_BASE,
     ROT_FRAME_TCP,
+    TORQUE_PCT_MAX,
+    TORQUE_PCT_MIN,
     Controller,
 )
 from motion.hw_controller import grip_100_to_user, grip_user_to_100
@@ -65,7 +71,9 @@ class PendantGui:
             text=(
                 f"Hold +/− to jog. Joint {JOINT_VEL_DEG_S:.0f}°/s · "
                 f"gripper {GRIPPER_VEL_UNIT_S:.0f}/s · "
-                f"TCP jog 5–15 mm/s · go-to {GOTO_DURATION_S:.1f}s. "
+                f"XYZ {JOG_VEL_MIN_MPS * 1000:.0f}–{JOG_VEL_MAX_MPS * 1000:.0f} mm/s · "
+                f"RPY {JOG_ROT_MIN_DEG_S:.0f}–{JOG_ROT_MAX_DEG_S:.0f}°/s · "
+                f"Move EE=XYZ/RPY · Move joints=토크% · "
                 f"Meshcat: {meshcat_url or 'open the printed URL'}"
             ),
             anchor="w",
@@ -80,7 +88,7 @@ class PendantGui:
         self.mode_label = ctk.CTkLabel(root, text="mode: virtual", font=ctk.CTkFont(family="monospace"), anchor="w")
         self.rot_frame_label = ctk.CTkLabel(
             root,
-            text="rot: base (월드 고정축)",
+            text="rot: base (project Rz180°)",
             font=ctk.CTkFont(family="monospace", size=14),
             anchor="w",
         )
@@ -152,6 +160,41 @@ class PendantGui:
                 lambda j=name: self._ctrl.set_joint_jog(j, 0),
             )
 
+        ctk.CTkLabel(left, text="Torque %  (Connect 후 모터에 적용)", anchor="w").pack(
+            anchor="w", padx=8, pady=(12, 4)
+        )
+        self._torque_labels: dict[str, ctk.CTkLabel] = {}
+        self._torque_sliders: dict[str, ctk.CTkSlider] = {}
+        self._torque_after: dict[str, str | None] = {}
+        for name in URDF_JOINT_NAMES:
+            default = (
+                DEFAULT_GRIPPER_TORQUE_PCT if name == GRIPPER_JOINT else DEFAULT_ARM_TORQUE_PCT
+            )
+            row = ctk.CTkFrame(left)
+            row.pack(fill="x", pady=2, padx=6)
+            alias = LEROBOT_FROM_URDF[name]
+            lab = ctk.CTkLabel(
+                row,
+                text=f"{name} ({alias})  {default:.0f}%",
+                width=220,
+                anchor="w",
+                font=ctk.CTkFont(family="monospace"),
+            )
+            lab.pack(side="left", padx=(4, 8))
+            self._torque_labels[name] = lab
+            slider = ctk.CTkSlider(
+                row,
+                from_=TORQUE_PCT_MIN,
+                to=TORQUE_PCT_MAX,
+                number_of_steps=int(TORQUE_PCT_MAX - TORQUE_PCT_MIN),
+                command=lambda v, j=name: self._on_torque_slider(j, v),
+            )
+            slider.set(default)
+            slider.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            self._torque_sliders[name] = slider
+            self._torque_after[name] = None
+            self._ctrl.set_joint_torque_pct(name, default)
+
         ctk.CTkLabel(left, text="Go-to joints (arm deg · gripper 0–100)", anchor="w").pack(
             anchor="w", padx=8, pady=(12, 4)
         )
@@ -170,7 +213,9 @@ class PendantGui:
         ctk.CTkButton(btn, text="Use current", width=110, command=self._fill_joints).pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Move joints", width=110, command=self._move_joints).pack(side="left")
 
-        ctk.CTkLabel(right, text="TCP (jaw-tip midpoint, base frame)", anchor="w").pack(anchor="w", padx=8, pady=(8, 4))
+        ctk.CTkLabel(right, text="TCP (jaw-tip midpoint, project base Rz180°)", anchor="w").pack(
+            anchor="w", padx=8, pady=(8, 4)
+        )
         self._cart_row(right, "X", "x")
         self._cart_row(right, "Y", "y")
         self._cart_row(right, "Z", "z")
@@ -210,7 +255,7 @@ class PendantGui:
             width=8,
         )
 
-        ctk.CTkLabel(right, text="Go-to TCP (mm / deg) · base 기준", anchor="w").pack(
+        ctk.CTkLabel(right, text="Go-to TCP (mm / deg) · project base Rz180°", anchor="w").pack(
             anchor="w", padx=8, pady=(12, 4)
         )
         self.ee_entries: dict[str, ctk.CTkEntry] = {}
@@ -245,7 +290,7 @@ class PendantGui:
         vel.pack(fill="x", padx=6, pady=(4, 8))
         self._tcp_vel_label = ctk.CTkLabel(
             vel,
-            text=f"TCP jog  {JOG_VEL_MPS * 1000:.0f} mm/s",
+            text=f"XYZ jog  {JOG_VEL_MPS * 1000:.0f} mm/s",
             anchor="w",
         )
         self._tcp_vel_label.pack(anchor="w", padx=4, pady=(6, 0))
@@ -257,8 +302,25 @@ class PendantGui:
             command=self._on_tcp_jog_speed,
         )
         self._tcp_vel_slider.set(JOG_VEL_MPS * 1000.0)
-        self._tcp_vel_slider.pack(fill="x", padx=4, pady=(4, 8))
+        self._tcp_vel_slider.pack(fill="x", padx=4, pady=(4, 4))
         self._ctrl.set_tcp_jog_mm_s(JOG_VEL_MPS * 1000.0)
+
+        self._rpy_vel_label = ctk.CTkLabel(
+            vel,
+            text=f"RPY jog  {JOG_ROT_DEG_S:.0f} deg/s",
+            anchor="w",
+        )
+        self._rpy_vel_label.pack(anchor="w", padx=4, pady=(6, 0))
+        self._rpy_vel_slider = ctk.CTkSlider(
+            vel,
+            from_=JOG_ROT_MIN_DEG_S,
+            to=JOG_ROT_MAX_DEG_S,
+            number_of_steps=int(JOG_ROT_MAX_DEG_S - JOG_ROT_MIN_DEG_S),
+            command=self._on_rpy_jog_speed,
+        )
+        self._rpy_vel_slider.set(JOG_ROT_DEG_S)
+        self._rpy_vel_slider.pack(fill="x", padx=4, pady=(4, 8))
+        self._ctrl.set_rpy_jog_deg_s(JOG_ROT_DEG_S)
 
         self.root.bind_all("<ButtonRelease-1>", self._on_global_release, add="+")
         self._fill_joints()
@@ -376,10 +438,34 @@ class PendantGui:
         self._ctrl.start_ee_goto(xyz, rpy)
 
     def _on_tcp_jog_speed(self, value: float) -> None:
+        lo = int(JOG_VEL_MIN_MPS * 1000.0)
+        hi = int(JOG_VEL_MAX_MPS * 1000.0)
         mm = int(round(float(value)))
-        mm = max(5, min(15, mm))
+        mm = max(lo, min(hi, mm))
         self._ctrl.set_tcp_jog_mm_s(mm)
-        self._tcp_vel_label.configure(text=f"TCP jog  {mm} mm/s")
+        self._tcp_vel_label.configure(text=f"XYZ jog  {mm} mm/s")
+
+    def _on_rpy_jog_speed(self, value: float) -> None:
+        deg = int(round(float(value)))
+        deg = max(int(JOG_ROT_MIN_DEG_S), min(int(JOG_ROT_MAX_DEG_S), deg))
+        self._ctrl.set_rpy_jog_deg_s(deg)
+        self._rpy_vel_label.configure(text=f"RPY jog  {deg} deg/s")
+
+    def _on_torque_slider(self, joint: str, value: float) -> None:
+        pct = int(round(float(value)))
+        pct = max(int(TORQUE_PCT_MIN), min(int(TORQUE_PCT_MAX), pct))
+        alias = LEROBOT_FROM_URDF[joint]
+        self._torque_labels[joint].configure(text=f"{joint} ({alias})  {pct}%")
+        prev = self._torque_after.get(joint)
+        if prev is not None:
+            self.root.after_cancel(prev)
+        self._torque_after[joint] = self.root.after(
+            120, lambda j=joint, p=pct: self._apply_torque(j, p)
+        )
+
+    def _apply_torque(self, joint: str, pct: int) -> None:
+        self._torque_after[joint] = None
+        self._ctrl.set_joint_torque_pct(joint, pct)
 
     def _on_rot_frame(self, value: str) -> None:
         frame = ROT_FRAME_TCP if str(value).upper() == "TCP" else ROT_FRAME_BASE
@@ -401,7 +487,7 @@ class PendantGui:
         if frame == ROT_FRAME_TCP:
             text = "rot: TCP (그리퍼 로컬 X/Y/Z · 빨/초/파)"
         else:
-            text = "rot: base (월드 고정축)"
+            text = "rot: base (project Rz180°)"
         self.rot_frame_label.configure(text=text)
 
     def _toggle_connect(self) -> None:

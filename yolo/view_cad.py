@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""yolo/cad/ STL 의 파일 축(XYZ)을 그대로 보여 준다.
+"""yolo/cad/ STL 축을 보여 준다 (model.yaml mesh_rpy 적용 후가 정본).
 
 등록·카메라 없음. 이 축이 roi_cloud.py / register.py 가 맞추는 정본이다.
-파일 원점 = (0,0,0), 회전 0. 빨강=X 초록=Y 파랑=Z.
+원점 = (0,0,0), 회전 0(보정 후). 빨강=X 초록=Y 파랑=Z.
 
   python yolo/view_cad.py
   python yolo/view_cad.py bracket_4035.stl
@@ -19,8 +19,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from yolo.config import CAD_DIR, cad_mesh_path, cad_unit
-from yolo.register import _to_mm
+from yolo.config import CAD_DIR, cad_mesh_path, cad_mesh_rpy_deg, cad_unit
+from yolo.register import _to_mm, apply_cad_mesh_frame
 
 
 def _resolve_mesh(name: str | None) -> Path:
@@ -52,7 +52,7 @@ def _load_mesh_mm(path: Path):
     mesh = o3d.io.read_triangle_mesh(str(path))
     if not mesh.has_triangles() or len(mesh.triangles) == 0:
         raise RuntimeError(f"삼각형 없음: {path}")
-    verts = _to_mm(np.asarray(mesh.vertices), cad_unit(), path)
+    verts = apply_cad_mesh_frame(_to_mm(np.asarray(mesh.vertices), cad_unit(), path), source=path)
     mesh.vertices = o3d.utility.Vector3dVector(verts)
     mesh.compute_vertex_normals()
     if not mesh.has_vertex_colors():
@@ -65,8 +65,9 @@ def _print_axes(path: Path, verts: np.ndarray, axis_mm: float) -> None:
     hi = verts.max(axis=0)
     span = hi - lo
     inside = bool(np.all(lo <= 0.0) and np.all(hi >= 0.0))
+    rpy = cad_mesh_rpy_deg() if path.resolve() == cad_mesh_path().resolve() else (0.0, 0.0, 0.0)
     print(f"파일  {path}")
-    print("CAD 축 = STL 파일 좌표. 원점 (0,0,0) mm, rpy = 0,0,0")
+    print(f"CAD 축 = STL + mesh_rpy {list(rpy)}  → 원점 (0,0,0) mm, 보정 후 rpy = 0,0,0")
     print("빨강=X  초록=Y  파랑=Z")
     print(
         f"bbox mm  min=[{lo[0]:.1f}, {lo[1]:.1f}, {lo[2]:.1f}]  "

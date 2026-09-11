@@ -64,6 +64,31 @@ def cad_unit() -> str:
     return _plain_yaml(CAD_YAML).get("unit", "mm") or "mm"
 
 
+def _yaml_vec3(key: str, *, default: tuple[float, float, float]) -> tuple[float, float, float]:
+    import ast
+
+    raw = _plain_yaml(CAD_YAML).get(key)
+    if not raw:
+        return default
+    try:
+        parsed = ast.literal_eval(raw)
+    except (SyntaxError, ValueError) as exc:
+        raise ValueError(f"{CAD_YAML} {key} 파싱 실패: {raw!r}") from exc
+    if not isinstance(parsed, (list, tuple)) or len(parsed) != 3:
+        raise ValueError(f"{CAD_YAML} {key} 는 숫자 3개여야 함: {raw!r}")
+    return (float(parsed[0]), float(parsed[1]), float(parsed[2]))
+
+
+def cad_mesh_rpy_deg() -> tuple[float, float, float]:
+    """STL 파일 → 프로젝트 CAD 프레임. model.yaml `mesh_rpy: [r,p,y]` (deg)."""
+    return _yaml_vec3("mesh_rpy", default=(0.0, 0.0, 0.0))
+
+
+def cad_mesh_xyz_mm() -> tuple[float, float, float]:
+    """회전 후 원점 이동(mm). model.yaml `mesh_xyz: [x,y,z]`."""
+    return _yaml_vec3("mesh_xyz", default=(0.0, 0.0, 0.0))
+
+
 def class_name() -> str:
     """YOLO 1클래스 이름. cad/model.yaml 의 class, 없으면 object."""
     return _plain_yaml(CAD_YAML).get("class") or "object"
@@ -97,7 +122,7 @@ TRAIN_BATCH = 4
 TRAIN_EPOCHS = 50
 TRAIN_WORKERS = 0  # Jetson 공유메모리. PC면 2~4
 TRAIN_SEG_BATCH = 2  # seg는 detect보다 VRAM을 더 쓴다
-DETECT_CONF = 0.4
+DETECT_CONF = 0.5
 
 
 def quiet_gtk() -> None:

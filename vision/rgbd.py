@@ -398,8 +398,8 @@ class OrbbecV1:
         sdk_dir: Path | None = None,
         *,
         noise_filter: bool | None = True,
-        noise_min_diff: int | None = None,
-        noise_max_size: int | None = None,
+        noise_min_diff: int | None = 51200,
+        noise_max_size: int | None = 1,
     ):
         sdk = Path(sdk_dir) if sdk_dir is not None else resolve_sdk_dir()
         so = _require_sdk(sdk)

@@ -5,6 +5,9 @@
 FK 프레임은 tcp. 보드를 끝단에 고정하고, YOLO와 같이 영상을 180° 회전한다.
 공장 K의 주점(cx,cy)도 같이 뒤집어서 PnP에 쓴다.
 
+베이스는 프로젝트 프레임(URDF Rz180°). 펜던트 pose 서버가 그 기준으로
+T_base_tcp 을 주므로, 저장되는 T_base_cam 도 같은 베이스다.
+
 키
   s / SPACE
            펜던트 TCP와 보드 영상을 저장. 코너 초록(16개+), Connect·토크 ON·정지.
@@ -221,7 +224,19 @@ def stable_tcp(samples: int = 5, settle_s: float = 0.5):
             f"rpy span={np.round(rpy_span, 2)} deg"
         )
     mid = samples // 2
-    return payloads[mid], xyz_span.tolist(), rpy_span.tolist()
+    err_rows = [
+        np.asarray(p["err_xyz_mm"], dtype=float).reshape(3)
+        for p in payloads
+        if p.get("err_xyz_mm") is not None
+    ]
+    if err_rows:
+        err_xyz = np.mean(np.stack(err_rows, axis=0), axis=0)
+        ee_err = float(np.linalg.norm(err_xyz))
+        err_xyz_mm = err_xyz.tolist()
+    else:
+        ee_err = None
+        err_xyz_mm = None
+    return payloads[mid], xyz_span.tolist(), rpy_span.tolist(), ee_err, err_xyz_mm
 
 
 def list_samples(samples_dir: Path) -> list[Path]:
@@ -401,6 +416,7 @@ def compute(samples_dir: Path) -> np.ndarray:
 
     payload = {
         "frame": "T_base_cam",
+        "base_frame": "project_rz180",
         "gripper_frame": GRIPPER_FRAME,
         "unit": "mm",
         "method": "charuco_ransac_pnp_handeye_park_eye_to_hand",
@@ -517,7 +533,7 @@ def capture_loop(samples_dir: Path) -> bool:
                     print(f"저장 안 함: 코너 {det.n_corners}개, 최소 {MIN_CORNERS}개")
                     continue
                 try:
-                    mid, xyz_span, rpy_span = stable_tcp()
+                    mid, xyz_span, rpy_span, ee_err, err_xyz = stable_tcp()
                 except RuntimeError as exc:
                     print("저장 안 함:", exc)
                     continue
@@ -535,6 +551,9 @@ def capture_loop(samples_dir: Path) -> bool:
                     "corners": det.n_corners,
                     "xyz_read_span_mm": xyz_span,
                     "rpy_read_span_deg": rpy_span,
+                    # Pendant err: cmd−meas TCP, project base (same as GUI Δx/Δy/Δz).
+                    "ee_err_mm": ee_err,
+                    "err_xyz_mm": err_xyz,
                     "board": {
                         "squares": [SQUARES_X, SQUARES_Y],
                         "square_mm": SQUARE_MM,
@@ -545,9 +564,16 @@ def capture_loop(samples_dir: Path) -> bool:
                     json.dumps(meta, indent=2), encoding="utf-8"
                 )
                 saved.append(png)
+                if err_xyz is not None and ee_err is not None:
+                    err_txt = (
+                        f" |Δ|={ee_err:.2f} "
+                        f"Δ=[{err_xyz[0]:+.2f},{err_xyz[1]:+.2f},{err_xyz[2]:+.2f}]"
+                    )
+                else:
+                    err_txt = " err=n/a"
                 print(
                     f"저장 {png.name} corners={det.n_corners} "
-                    f"xyz={np.round(xyz, 1).tolist()} total={len(saved)}"
+                    f"xyz={np.round(xyz, 1).tolist()}{err_txt} total={len(saved)}"
                 )
     finally:
         cap.release()

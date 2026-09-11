@@ -3,16 +3,22 @@
 mesh: bracket_4035.stl
 unit: mm
 class: bracket
+# STL 파일 축 → 프로젝트 CAD 프레임 (deg, XYZ extrinsic).
+# Rx180: 파일 +Z(브라켓 아래) → 프로젝트 +Z(위).
+mesh_rpy: [180, 0, 0]
 
-# 시뮬 배치 (베이스 mm/deg). pick 변환에는 안 씀.
+# 시뮬 배치 (프로젝트 베이스 mm/deg = URDF Rz180°). pick 변환에는 안 씀.
 place:
-  xyz_mm: [200, 0, 2]
-  rpy_deg: [180, 0, 0]
+  xyz_mm: [-150, 150, 2]
+  rpy_deg: [0, 0, 0]
 
 # 집기 (CAD 축 mm/deg). T_base_grasp = T_base_cad @ T_cad_grasp
 # 숫자는 python yolo/teach_grasp.py 에서 보면서 고친다.
 grasp:
-  xyz_mm: [20, 0, 1]
-  rpy_deg: [180, 0, 0]
-  pre_grasp_mm: 45
+  xyz_mm: [0, 0, 0]
+  rpy_deg: [0, 0, 0]
   gripper: 50
+
+# 브라켓 접근: pre = L+d, grasp = L+d−a (축 따라 원점 쪽으로 a mm).
+approach_d_mm: 10
+approach_a_mm: 30

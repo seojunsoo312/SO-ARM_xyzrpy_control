@@ -13,12 +13,14 @@ import meshcat.geometry as g
 import numpy as np
 from pinocchio.visualize import MeshcatVisualizer
 
+from motion.base_frame import T_urdf_from_user_matrix
 from motion.robot_kinematics import RobotKinematics
 
 # Meshcat OrbitControls always orbit world origin. Do not translate
 # /Cameras/default — that parent offset makes pan/orbit/dolly fight the target.
 # Camera lives in an Rx(+90°) frame; default convention is (x, z, 0) like (3, 1, 0).
 # Closer copy of that so the ~0.4 m arm fills the view.
+# Project base axes (overlay) are URDF Rz(180°); see motion/base_frame.py.
 CAM_POSITION = (0.70, 0.32, 0.0)
 OVERLAY_ROOT = "teach"
 
@@ -98,13 +100,28 @@ class Visualizer:
         # TCP axes (body-fixed on L6 / wrist_roll, not the moving jaw).
         self._viz.displayFrames(True, frame_ids=[kinematics.ee_frame_id], axis_length=0.05)
         self._set_initial_camera()
-        # Base frame at world origin with X/Y/Z letters.
-        self.set_overlay_axes("base", np.eye(4), scale=0.06, tag="B")
+        self._align_floor_axes()
+        self._mark_origin()
+        # Labeled project-base triad (same Rz180° as /Axes).
+        self.set_overlay_axes("base", T_urdf_from_user_matrix(), scale=0.06, tag="B")
+
+    def _mark_origin(self) -> None:
+        """Red sphere at shared URDF / project-base origin (0,0,0)."""
+        node = self._viz.viewer["origin"]
+        node.set_object(
+            g.Sphere(0.002),
+            g.MeshLambertMaterial(color=0xE53935, reflectivity=0.1),
+        )
+        node.set_transform(np.eye(4))
 
     def _set_initial_camera(self) -> None:
         vis = self._viz.viewer
         vis["/Cameras/default"].set_transform(np.eye(4))
         vis["/Cameras/default/rotated/<object>"].set_property("position", list(CAM_POSITION))
+
+    def _align_floor_axes(self) -> None:
+        """Meshcat `/Axes` defaults to URDF world — rotate to project base (Rz180°)."""
+        self._viz.viewer["/Axes"].set_transform(T_urdf_from_user_matrix())
 
     def _overlay(self, name: str):
         return self._viz.viewer[OVERLAY_ROOT][name]
@@ -195,6 +212,13 @@ class Visualizer:
     def set_overlay_transform(self, name: str, T: np.ndarray) -> None:
         self._overlay(name).set_transform(np.asarray(T, dtype=float))
 
+    def clear_overlay(self, name: str) -> None:
+        """Remove an overlay subtree (axes, mesh, spheres, …)."""
+        try:
+            self._overlay(name).delete()
+        except Exception:
+            pass
+
     def set_overlay_segment(
         self,
         name: str,
@@ -213,6 +237,30 @@ class Visualizer:
             )
         )
         node.set_transform(np.eye(4))
+
+    def set_overlay_spheres(
+        self,
+        name: str,
+        centers_m: np.ndarray,
+        *,
+        radius_m: float = 0.004,
+        color: int = 0x1E88E8,
+        colors: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
+        """Spheres at world positions (m). Optional per-sphere colors."""
+        root = self._overlay(name)
+        centers = np.asarray(centers_m, dtype=float).reshape(-1, 3)
+        r = float(radius_m)
+        for i, c in enumerate(centers):
+            col = int(colors[i]) if colors is not None else int(color)
+            node = root[f"p{i}"]
+            node.set_object(
+                g.Sphere(r),
+                g.MeshLambertMaterial(color=col, reflectivity=0.2),
+            )
+            T = np.eye(4)
+            T[:3, 3] = np.asarray(c, dtype=float).reshape(3)
+            node.set_transform(T)
 
     def display(self, q: np.ndarray) -> None:
         self._viz.display(q)

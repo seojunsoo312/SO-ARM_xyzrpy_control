@@ -26,11 +26,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vision.transforms import apply_T, rt_to_T
-from yolo.config import cad_mesh_path, cad_unit
+from yolo.config import cad_mesh_path, cad_mesh_rpy_deg, cad_mesh_xyz_mm, cad_unit
 from yolo.depth_cloud import write_ply
 
 MIN_POINTS = 20
-_CAD_CACHE: dict[tuple[str, float, str], np.ndarray] = {}
+_CAD_CACHE: dict[tuple, np.ndarray] = {}
 
 
 def _require_o3d():
@@ -41,6 +41,32 @@ def _require_o3d():
             "open3d가 없습니다. conda activate lerobot 한 뒤 설치하세요."
         ) from exc
     return o3d
+
+
+def cad_mesh_R() -> np.ndarray:
+    """model.yaml mesh_rpy → 3x3. 파일 좌표 → 프로젝트 CAD 프레임."""
+    from motion.robot_kinematics import rpy_deg_to_rotmat
+
+    r, p, y = cad_mesh_rpy_deg()
+    if abs(r) < 1e-12 and abs(p) < 1e-12 and abs(y) < 1e-12:
+        return np.eye(3)
+    return rpy_deg_to_rotmat(r, p, y)
+
+
+def apply_cad_mesh_frame(xyz: np.ndarray, *, source: Path | None = None) -> np.ndarray:
+    """STL/점군에 mesh_rpy 후 mesh_xyz. model.yaml mesh 가 아닐 때는 그대로."""
+    pts = _as_xyz(xyz)
+    if source is not None:
+        try:
+            if source.resolve() != cad_mesh_path().resolve():
+                return pts
+        except FileNotFoundError:
+            return pts
+    R = cad_mesh_R()
+    t = np.asarray(cad_mesh_xyz_mm(), dtype=np.float64).reshape(3)
+    if np.allclose(R, np.eye(3)) and np.allclose(t, 0.0):
+        return pts
+    return (R @ pts.T).T + t
 
 
 def _as_xyz(xyz: np.ndarray) -> np.ndarray:
@@ -109,20 +135,22 @@ def load_ply_xyz(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
 
 
 def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarray:
-    """CAD ply/mesh → mm 점군. 축은 파일 그대로."""
+    """CAD ply/mesh → mm 점군. model.yaml mesh 면 mesh_rpy 적용."""
     o3d = _require_o3d()
     source = Path(path) if path is not None else cad_mesh_path()
     if not source.is_file():
         raise FileNotFoundError(f"CAD 없음: {source}")
     unit = cad_unit()
-    key = (str(source.resolve()), float(voxel_mm), unit)
+    rpy = cad_mesh_rpy_deg() if source.resolve() == cad_mesh_path().resolve() else (0.0, 0.0, 0.0)
+    xyz0 = cad_mesh_xyz_mm() if source.resolve() == cad_mesh_path().resolve() else (0.0, 0.0, 0.0)
+    key = (str(source.resolve()), float(voxel_mm), unit, rpy, xyz0)
     cached = _CAD_CACHE.get(key)
     if cached is not None:
         return cached.copy()
 
     mesh = o3d.io.read_triangle_mesh(str(source))
     if mesh.has_triangles() and len(mesh.triangles) > 0:
-        verts = _to_mm(np.asarray(mesh.vertices), unit, source)
+        verts = apply_cad_mesh_frame(_to_mm(np.asarray(mesh.vertices), unit, source), source=source)
         mesh.vertices = o3d.utility.Vector3dVector(verts)
         mesh.compute_vertex_normals()
         area = float(mesh.get_surface_area())
@@ -136,7 +164,7 @@ def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarr
         pcd = o3d.io.read_point_cloud(str(source))
         if not pcd.has_points():
             raise RuntimeError(f"CAD를 못 읽음: {source}")
-        pts = _to_mm(np.asarray(pcd.points), unit, source)
+        pts = apply_cad_mesh_frame(_to_mm(np.asarray(pcd.points), unit, source), source=source)
         pcd.points = o3d.utility.Vector3dVector(pts)
 
     if voxel_mm > 0:
@@ -145,9 +173,15 @@ def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarr
     if len(xyz) < MIN_POINTS:
         raise RuntimeError(f"CAD 점이 너무 적음: {len(xyz)}  {source}")
     span = _extent_mm(xyz)
+    extra = ""
+    if any(abs(v) > 1e-12 for v in rpy):
+        extra += f"  mesh_rpy={list(rpy)}"
+    if any(abs(v) > 1e-12 for v in xyz0):
+        extra += f"  mesh_xyz={list(xyz0)}"
+    rpy_txt = extra
     print(
         f"CAD {source.name}  n={len(xyz)}  "
-        f"span={span[0]:.1f}×{span[1]:.1f}×{span[2]:.1f} mm"
+        f"span={span[0]:.1f}×{span[1]:.1f}×{span[2]:.1f} mm{rpy_txt}"
     )
     _CAD_CACHE[key] = xyz
     return xyz.copy()
@@ -181,13 +215,9 @@ def _preprocess(
 
 
 def _nn_dists(query: np.ndarray, ref: np.ndarray) -> np.ndarray:
-    o3d = _require_o3d()
-    tree = o3d.geometry.KDTreeFlann(_pcd(ref))
-    out = np.empty(len(query), dtype=np.float64)
-    for i, p in enumerate(np.asarray(query, dtype=np.float64).reshape(-1, 3)):
-        _, _, d2 = tree.search_knn_vector_3d(p, 1)
-        out[i] = float(np.sqrt(d2[0]))
-    return out
+    q = _pcd(query)
+    r = _pcd(ref)
+    return np.asarray(q.compute_point_cloud_distance(r), dtype=np.float64)
 
 
 def scene_coverage(
@@ -265,31 +295,36 @@ def pose_coverage(
     *,
     thresh_mm: float = 3.0,
     camera_origin: np.ndarray | None = None,
+    detail: bool = True,
 ) -> dict:
-    """회색→CAD 와 보이는 CAD→회색, 탑뷰 IoU."""
+    """회색→CAD. detail=False 면 가시성·IoU를 건너뛰어 후보 비교만 한다."""
     cad = _as_xyz(cad_xyz)
     scene = _as_xyz(scene_xyz)
     aligned = apply_T(cad, np.asarray(T, dtype=np.float64))
     scene_d = _nn_dists(scene, aligned)
-    vis = visible_xyz(aligned, camera_origin)
-    vis_d = _nn_dists(vis, scene)
     scene_center = (scene.min(axis=0) + scene.max(axis=0)) * 0.5
     cad_center = (aligned.min(axis=0) + aligned.max(axis=0)) * 0.5
     cov = {
         "frac": float(np.mean(scene_d <= thresh_mm)),
-        "vis_frac": float(np.mean(vis_d <= thresh_mm)),
-        "xy_iou": _xy_iou(scene, vis),
+        "vis_frac": 0.0,
+        "xy_iou": 0.0,
         "median": float(np.median(scene_d)),
         "p90": float(np.percentile(scene_d, 90)),
         "max": float(np.max(scene_d)),
         "center_delta": float(np.linalg.norm(scene_center - cad_center)),
-        "n_vis": int(len(vis)),
+        "n_vis": int(len(aligned)),
     }
+    if detail:
+        vis = visible_xyz(aligned, camera_origin)
+        vis_d = _nn_dists(vis, scene)
+        cov["vis_frac"] = float(np.mean(vis_d <= thresh_mm))
+        cov["xy_iou"] = _xy_iou(scene, vis)
+        cov["n_vis"] = int(len(vis))
     cov["aligned_ok"] = bool(
-        cov["frac"] >= 0.75
+        cov["frac"] >= 0.80
         and cov["median"] <= 1.5
         and cov["p90"] <= 4.0
-        and cov["center_delta"] <= 12.0
+        and cov["center_delta"] <= 6.0
     )
     return cov
 
@@ -332,12 +367,9 @@ def _R_axis(axis: int, deg: float) -> np.ndarray:
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
-def _local_90_rots() -> list[np.ndarray]:
-    out = [np.eye(3)]
-    for axis in (0, 1, 2):
-        for deg in (90.0, 180.0, 270.0):
-            out.append(_R_axis(axis, deg))
-    return out
+def _yaw_rots() -> list[np.ndarray]:
+    """책상 위 ㄴ은 yaw(CAD Z)만 90° 주기. Rx/Ry 는 팔을 세워서 축이 ㄴ 안으로 들어간다."""
+    return [_R_axis(2, deg) for deg in (0.0, 90.0, 180.0, 270.0)]
 
 
 def _shift_centroids(T: np.ndarray, cad: np.ndarray, scene: np.ndarray) -> np.ndarray:
@@ -389,7 +421,7 @@ def _refine_candidates(
     try_90: bool,
 ) -> tuple[np.ndarray, dict, str]:
     """무게중심 + 다단 ICP. 첫 등록이면 ㄴ 90°도 같이 본다."""
-    rots = _local_90_rots() if try_90 else [np.eye(3)]
+    rots = _yaw_rots() if try_90 else [np.eye(3)]
     T0 = np.asarray(T0, dtype=np.float64).reshape(4, 4)
     best_T = T0
     best_cov = pose_coverage(cad, scene, T0, thresh_mm=3.0, camera_origin=camera_origin)
@@ -398,7 +430,6 @@ def _refine_candidates(
     for Rloc in rots:
         T = T0.copy()
         T[:3, :3] = T0[:3, :3] @ Rloc
-        T = _shift_centroids(T, cad, scene)
         T = _icp_multiscale(source, target, T, voxel_mm=voxel_mm)
         cov = pose_coverage(cad, scene, T, thresh_mm=3.0, camera_origin=camera_origin)
         key = _score_key(cov)
@@ -442,6 +473,44 @@ def _clean_registration_scene(scene_xyz: np.ndarray) -> np.ndarray:
     return points if len(points) >= MIN_POINTS else scene
 
 
+def _snap_cad_90(
+    cad: np.ndarray,
+    scene: np.ndarray,
+    source,
+    target,
+    T_cad_scene: np.ndarray,
+    *,
+    camera_origin: np.ndarray,
+    cover_mm: float,
+    up: np.ndarray | None,
+) -> tuple[np.ndarray, dict]:
+    """CAD +Z 를 위로 맞춘 뒤, ㄴ yaw 만 0/90/180/270 으로 고른다."""
+    T0 = np.asarray(T_cad_scene, dtype=np.float64).reshape(4, 4)
+    if up is not None:
+        T0 = maybe_flip_into_table(T0, up_base=up)
+    best_T = T0
+    best_cov = pose_coverage(
+        cad, scene, T0, thresh_mm=cover_mm, camera_origin=camera_origin, detail=False
+    )
+    best_key = _score_key(best_cov)
+    for Rloc in _yaw_rots():
+        T = T0.copy()
+        T[:3, :3] = T0[:3, :3] @ Rloc
+        T_sc = _partial_icp_to_cad(source, target, np.linalg.inv(T))
+        T = np.linalg.inv(T_sc)
+        if up is not None:
+            T = maybe_flip_into_table(T, up_base=up)
+        cov = pose_coverage(
+            cad, scene, T, thresh_mm=cover_mm, camera_origin=camera_origin, detail=False
+        )
+        key = _score_key(cov)
+        if key > best_key:
+            best_key = key
+            best_T = T
+            best_cov = cov
+    return best_T, best_cov
+
+
 def _partial_icp_to_cad(source, target, T_scene_cad: np.ndarray) -> np.ndarray:
     """부분 장면→전체 CAD 방향으로 coarse-to-fine ICP."""
     T = np.asarray(T_scene_cad, dtype=np.float64).reshape(4, 4)
@@ -465,6 +534,7 @@ def register_fpfh_icp(
     voxel_mm: float = 2.0,
     tries: int = 8,
     camera_origin: np.ndarray | None = None,
+    up: np.ndarray | None = None,
 ) -> dict:
     """부분 장면→전체 CAD로 등록한 뒤 CAD→장면 T를 반환한다."""
     o3d = _require_o3d()
@@ -493,44 +563,66 @@ def register_fpfh_icp(
         if ransac.fitness <= 0.0:
             continue
         T_sc_init = np.asarray(ransac.transformation, dtype=np.float64)
-        candidates = [
-            ("ransac_partial", T_sc_init),
-            ("icp_partial", _partial_icp_to_cad(source, target, T_sc_init)),
-        ]
-        for method, T_scene_cad in candidates:
-            T = np.linalg.inv(T_scene_cad)
-            cov = pose_coverage(
-                cad, scene, T, thresh_mm=cover_mm, camera_origin=cam
-            )
-            key = _score_key(cov)
-            if best is None or key > best_key:
-                best_key = key
-                best = {
-                    "T": T,
-                    "T_init": np.linalg.inv(T_sc_init),
-                    "fitness": cov["frac"],
-                    "inlier_rmse": cov["median"],
-                    "fitness_ransac": float(ransac.fitness),
-                    "inlier_rmse_ransac": float(ransac.inlier_rmse),
-                    "icp_method": method,
-                    "scene_frac": cov["frac"],
-                    "scene_med": cov["median"],
-                    "scene_p90": cov["p90"],
-                    "vis_frac": cov["vis_frac"],
-                    "xy_iou": cov["xy_iou"],
-                    "center_delta": cov["center_delta"],
-                    "aligned_ok": cov["aligned_ok"],
-                    "n_cad": int(len(target.points)),
-                    "n_scene": int(len(source.points)),
-                    "voxel_mm": float(voxel_mm),
-                    "source": "partial_fpfh_icp",
-                }
+        T_scene_cad = _partial_icp_to_cad(source, target, T_sc_init)
+        T = np.linalg.inv(T_scene_cad)
+        cov = pose_coverage(
+            cad, scene, T, thresh_mm=cover_mm, camera_origin=cam, detail=False
+        )
+        key = _score_key(cov)
+        if best is None or key > best_key:
+            best_key = key
+            best = {
+                "T": T,
+                "T_init": np.linalg.inv(T_sc_init),
+                "fitness": cov["frac"],
+                "inlier_rmse": cov["median"],
+                "fitness_ransac": float(ransac.fitness),
+                "inlier_rmse_ransac": float(ransac.inlier_rmse),
+                "icp_method": "icp_partial",
+                "scene_frac": cov["frac"],
+                "scene_med": cov["median"],
+                "scene_p90": cov["p90"],
+                "vis_frac": cov["vis_frac"],
+                "xy_iou": cov["xy_iou"],
+                "center_delta": cov["center_delta"],
+                "aligned_ok": cov["aligned_ok"],
+                "n_cad": int(len(target.points)),
+                "n_scene": int(len(source.points)),
+                "voxel_mm": float(voxel_mm),
+                "source": "partial_fpfh_icp",
+            }
 
     if best is None:
         raise RuntimeError(
             "FPFH+RANSAC 실패. ROI 점이 너무 적거나 평면만 남았을 수 있습니다. "
             f"cad={len(target.points)} scene={len(source.points)} voxel={voxel_mm}"
         )
+
+    T_snap, _ = _snap_cad_90(
+        cad,
+        scene,
+        source,
+        target,
+        best["T"],
+        camera_origin=cam,
+        cover_mm=cover_mm,
+        up=up,
+    )
+    best["T"] = T_snap
+    best["icp_method"] = "icp_partial_90"
+
+    cov = pose_coverage(
+        cad, scene, best["T"], thresh_mm=cover_mm, camera_origin=cam, detail=True
+    )
+    best["fitness"] = cov["frac"]
+    best["inlier_rmse"] = cov["median"]
+    best["scene_frac"] = cov["frac"]
+    best["scene_med"] = cov["median"]
+    best["scene_p90"] = cov["p90"]
+    best["vis_frac"] = cov["vis_frac"]
+    best["xy_iou"] = cov["xy_iou"]
+    best["center_delta"] = cov["center_delta"]
+    best["aligned_ok"] = cov["aligned_ok"]
 
     if not best.get("aligned_ok", False):
         print(
@@ -678,19 +770,27 @@ def register_pose(
     """
     cad_xyz = load_cad_xyz(cad_path, voxel_mm=voxel_mm)
     cam = camera_origin
+    up = np.array([0.0, 0.0, 1.0]) if flip and T_base_cam is None else None
     if T_init is not None:
         raw = refine_icp(
             cad_xyz, scene_xyz, T_init, voxel_mm=voxel_mm, camera_origin=cam
         )
     else:
         raw = register_fpfh_icp(
-            cad_xyz, scene_xyz, voxel_mm=voxel_mm, tries=tries, camera_origin=cam
+            cad_xyz,
+            scene_xyz,
+            voxel_mm=voxel_mm,
+            tries=tries,
+            camera_origin=cam,
+            up=up,
         )
     T = raw["T"]
     if T_base_cam is not None:
         T = np.asarray(T_base_cam, dtype=np.float64).reshape(4, 4) @ T
         if flip:
             T = maybe_flip_into_table(T, up_base=np.array([0.0, 0.0, 1.0]))
+    elif flip:
+        T = maybe_flip_into_table(T, up_base=np.array([0.0, 0.0, 1.0]))
     T = stabilize_T(T, T_prev, pivot=np.median(cad_xyz, axis=0))
     xyz, rpy = T_to_xyzrpy(T)
     return {
@@ -832,6 +932,8 @@ def main() -> None:
             str(Path(__file__).resolve().parent / "view_cloud.py"),
             str(overlay_path),
             "--no-obb",
+            "--cad-T="
+            + ",".join(f"{x:.9g}" for x in np.asarray(T_overlay).reshape(-1)),
         ]
         if args.dense or float(args.overlay_voxel_mm) <= 1.0:
             view_cmd.extend(["--point-size", "2"])

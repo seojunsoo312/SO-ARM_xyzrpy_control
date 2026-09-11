@@ -5,7 +5,7 @@ V4L2 컬러만으로는 안 된다. Orbbec SDK(D2C) + 학습한 best.pt / best-s
 펜던트·Viewer·detect.py 와 동시에 켜지 말 것.
 
   python yolo/roi_cloud.py
-  python yolo/roi_cloud.py --mask          # 세그 마스크 (쌓임 권장)
+  python yolo/roi_cloud.py --mask          # 세그 ROI + RGB 색칠(뎁스는 마스킹 없음)
   python yolo/roi_cloud.py --mask --cad    # 사진에 CAD 축 + xyzrpy
   python yolo/roi_cloud.py --mask --cad --base
   python yolo/roi_cloud.py --mask --no-noise-filter
@@ -37,7 +37,7 @@ from yolo.depth_cloud import (
     rotate180,
     write_ply,
 )
-from yolo.grasp_pose import SLICE_MM, collect_instances, local_pose, select_topmost
+from yolo.grasp_pose import MASK_PLANE_MM, SLICE_MM, collect_instances, local_pose, select_topmost
 
 quiet_gtk()
 
@@ -48,8 +48,8 @@ WIN = "YOLO box ROI cloud"
 ROI_DIR = RUNS_DIR / "roi"
 NOISE_MIN_DIFF_MAX = 51200  # Orbbec 문서 min_diff 1~51200
 NOISE_MAX_SIZE_MAX = 1000  # Orbbec 문서 max_size 1~1000
-NOISE_MIN_DIFF_DEFAULT = 256
-NOISE_MAX_SIZE_DEFAULT = 80
+NOISE_MIN_DIFF_DEFAULT = 51200
+NOISE_MAX_SIZE_DEFAULT = 1
 TB_MIN_DIFF = "MinDiff"
 TB_MAX_SIZE = "MaxSize"
 
@@ -210,7 +210,11 @@ class _CadWorker:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="YOLO box → RGB-D point ROI")
-    parser.add_argument("--mask", action="store_true", help="세그 마스크 ROI (박스보다 타이트)")
+    parser.add_argument(
+        "--mask",
+        action="store_true",
+        help="세그 마스크로 ROI + RGB만 색칠(박스 없음). 뎁스는 원본",
+    )
     parser.add_argument("--weights", type=Path, default=None)
     parser.add_argument("--conf", type=float, default=DETECT_CONF)
     parser.add_argument(
@@ -224,7 +228,7 @@ def main() -> None:
         "--plane-mm",
         type=float,
         default=4.0,
-        help="책상 평면에서 이 높이(mm) 이내 점 제거",
+        help="박스 모드에서 책상 평면 이내 점 제거(mm). --mask 는 2mm 고정",
     )
     parser.add_argument("--no-plane", action="store_true", help="RANSAC 책상 제거 안 함")
     parser.add_argument(
@@ -283,14 +287,14 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Viewer Min Diff. 키우면 단차 있는 면을 더 남김",
+        help="Viewer Min Diff. 기본 51200",
     )
     parser.add_argument(
         "--noise-max-size",
         type=int,
         default=None,
         metavar="N",
-        help="Viewer Max Size. 낮추면 작은 물체를 덜 지움",
+        help="Viewer Max Size. 기본 1",
     )
     parser.add_argument(
         "--no-outlier",
@@ -339,29 +343,24 @@ def main() -> None:
         frame_name = "base_mm"
         print(f"T_base_cam {t_path}")
 
+    noise_min_diff = (
+        args.noise_min_diff if args.noise_min_diff is not None else NOISE_MIN_DIFF_DEFAULT
+    )
+    noise_max_size = (
+        args.noise_max_size if args.noise_max_size is not None else NOISE_MAX_SIZE_DEFAULT
+    )
     cam = open_orbbec(
         noise_filter=not args.no_noise_filter,
-        noise_min_diff=args.noise_min_diff,
-        noise_max_size=args.noise_max_size,
+        noise_min_diff=noise_min_diff,
+        noise_max_size=noise_max_size,
     )
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     noise_sliders = not args.no_noise_filter
     last_min_diff = NOISE_MIN_DIFF_DEFAULT
     last_max_size = NOISE_MAX_SIZE_DEFAULT
     if noise_sliders:
-        cur = cam.get_noise_filter()
-        last_min_diff = int(
-            args.noise_min_diff
-            if args.noise_min_diff is not None
-            else (cur["min_diff"] if cur["min_diff"] is not None else NOISE_MIN_DIFF_DEFAULT)
-        )
-        last_max_size = int(
-            args.noise_max_size
-            if args.noise_max_size is not None
-            else (cur["max_size"] if cur["max_size"] is not None else NOISE_MAX_SIZE_DEFAULT)
-        )
-        last_min_diff = int(np.clip(last_min_diff, 1, NOISE_MIN_DIFF_MAX))
-        last_max_size = int(np.clip(last_max_size, 1, NOISE_MAX_SIZE_MAX))
+        last_min_diff = int(np.clip(noise_min_diff, 1, NOISE_MIN_DIFF_MAX))
+        last_max_size = int(np.clip(noise_max_size, 1, NOISE_MAX_SIZE_MAX))
         cv2.createTrackbar(TB_MIN_DIFF, WIN, last_min_diff, NOISE_MIN_DIFF_MAX, lambda *_: None)
         cv2.createTrackbar(TB_MAX_SIZE, WIN, last_max_size, NOISE_MAX_SIZE_MAX, lambda *_: None)
         print(
@@ -492,6 +491,8 @@ def main() -> None:
                     else:
                         cad_pose = None
                         last_cad_anchor = None
+                        # miss 직후 due 가 이미 지나 있어 바로 전체 RANSAC이 다시 돈다.
+                        last_cad_t = time.monotonic()
                 now = time.monotonic()
                 due = (now - last_cad_t) >= max(0.2, float(args.cad_every))
                 pose_ok = cad_pose is not None and cad_pose.get("aligned_ok", False)
@@ -516,13 +517,27 @@ def main() -> None:
             for i, inst in enumerate(instances):
                 x1, y1, x2, y2 = [int(v) for v in inst.xyxy]
                 color = (0, 255, 255) if i == chosen else (0, 180, 0)
-                thick = 3 if i == chosen else 2
-                cv2.rectangle(bgr, (x1, y1), (x2, y2), color, thick)
-                cv2.rectangle(depth_vis, (x1, y1), (x2, y2), color, thick)
-                contours, _ = cv2.findContours(
-                    inst.roi.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
-                cv2.drawContours(depth_vis, contours, -1, (255, 255, 255), 1)
+                if args.mask:
+                    tint = np.zeros_like(bgr)
+                    tint[inst.roi] = color
+                    cv2.addWeighted(tint, 0.35, bgr, 1.0, 0.0, dst=bgr)
+                    contours, _ = cv2.findContours(
+                        inst.roi.astype(np.uint8),
+                        cv2.RETR_EXTERNAL,
+                        cv2.CHAIN_APPROX_SIMPLE,
+                    )
+                    cv2.drawContours(bgr, contours, -1, color, 1)
+                    ys, xs = np.nonzero(inst.roi)
+                    if len(xs):
+                        tag_x = int(xs.min())
+                        tag_y = max(16, int(ys.min()) - 6)
+                    else:
+                        tag_x, tag_y = x1, max(16, y1 - 6)
+                else:
+                    thick = 3 if i == chosen else 2
+                    cv2.rectangle(bgr, (x1, y1), (x2, y2), color, thick)
+                    cv2.rectangle(depth_vis, (x1, y1), (x2, y2), color, thick)
+                    tag_x, tag_y = x1, max(16, y1 - 6)
                 tag = f"{len(inst.xyz)} pts zok={inst.n_zok}"
                 if i == chosen and last_pose is not None:
                     tag = (
@@ -532,7 +547,7 @@ def main() -> None:
                 cv2.putText(
                     bgr,
                     tag,
-                    (x1, max(16, y1 - 6)),
+                    (tag_x, tag_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     color,
@@ -547,7 +562,11 @@ def main() -> None:
             if last_pose is not None:
                 c = last_pose["center_mm"]
                 yawtxt = f"  yaw={last_pose['yaw_deg']:.1f} c={c[0]:.0f},{c[1]:.0f}"
-            plane_text = "plane=off" if plane is None else f"plane>{args.plane_mm:.0f}mm"
+            if plane is None:
+                plane_text = "plane=off"
+            else:
+                cut = MASK_PLANE_MM if args.mask else args.plane_mm
+                plane_text = f"plane>{cut:.0f}mm"
             hint = "v=3D s=save r=plane q=quit"
             if args.cad:
                 hint = "c=CAD " + hint
@@ -685,6 +704,12 @@ def main() -> None:
                     str(Path(__file__).resolve().parent / "view_cloud.py"),
                     str(preview),
                 ]
+                if cad_pose is not None:
+                    # T[0,0] 이 음수면 "--cad-T" 다음 토큰이 새 옵션으로 파싱된다.
+                    view_cmd.append(
+                        "--cad-T="
+                        + ",".join(f"{x:.9g}" for x in np.asarray(cad_pose["T"]).reshape(-1))
+                    )
                 if args.dense or float(args.overlay_voxel_mm) <= 1.0:
                     view_cmd.extend(["--point-size", "2"])
                 if args.no_outlier:

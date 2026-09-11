@@ -4,6 +4,8 @@
   python yolo/view_cloud.py                 # runs/roi의 최신 PLY
   python yolo/view_cloud.py path/to/roi.ply
   c = 빨간 CAD 점군 on/off (overlay ply)
+  축: 원점(로봇/작업 프레임) + --cad-T 있으면 CAD.
+  XY 그리드(z=0) 기본. --no-grid 로 끔.
 """
 
 from __future__ import annotations
@@ -88,16 +90,65 @@ def _clean_scene(pcd, *, nb_neighbors: int, std_ratio: float):
     return _clip_far_from_median(pcd)
 
 
-def _geometries(pcd, show_obb: bool = True):
+def _xy_grid(
+    *,
+    half_mm: float,
+    step_mm: float,
+    z: float = 0.0,
+    color=(0.35, 0.35, 0.38),
+):
+    """Working-frame XY plane (z=constant). Same origin as the axis triad."""
+    import open3d as o3d
+
+    half = float(max(half_mm, step_mm))
+    step = float(max(step_mm, 1.0))
+    xs = np.arange(-half, half + 0.5 * step, step)
+    ys = np.arange(-half, half + 0.5 * step, step)
+    points: list[list[float]] = []
+    lines: list[list[int]] = []
+    for y in ys:
+        i0 = len(points)
+        points.append([-half, float(y), z])
+        points.append([half, float(y), z])
+        lines.append([i0, i0 + 1])
+    for x in xs:
+        i0 = len(points)
+        points.append([float(x), -half, z])
+        points.append([float(x), half, z])
+        lines.append([i0, i0 + 1])
+    grid = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64)),
+        lines=o3d.utility.Vector2iVector(np.asarray(lines, dtype=np.int32)),
+    )
+    grid.colors = o3d.utility.Vector3dVector(np.tile(np.asarray(color, dtype=np.float64), (len(lines), 1)))
+    return grid
+
+
+def _geometries(pcd, show_obb: bool = True, show_grid: bool = True, T_cad=None):
     import open3d as o3d
 
     extras = []
     if not pcd.has_points():
         return extras
     bounds = pcd.get_axis_aligned_bounding_box()
-    diagonal = float(np.linalg.norm(bounds.get_extent()))
-    axis_size = max(diagonal * 0.35, 5.0)
-    extras.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=axis_size))
+    extent = np.asarray(bounds.get_extent(), dtype=float)
+    diagonal = float(np.linalg.norm(extent))
+    extras.append(
+        o3d.geometry.TriangleMesh.create_coordinate_frame(
+            size=max(min(diagonal * 0.25, 60.0), 25.0)
+        )
+    )
+    if T_cad is not None:
+        cad_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=30.0)
+        cad_frame.transform(np.asarray(T_cad, dtype=np.float64).reshape(4, 4))
+        extras.append(cad_frame)
+    if show_grid:
+        # Cover origin triad + reach toward the cloud (camera clouds sit far on +Z).
+        center = np.asarray(bounds.get_center(), dtype=float)
+        reach = float(np.linalg.norm(center[:2])) + 0.5 * float(np.linalg.norm(extent[:2]))
+        half = max(0.5 * diagonal, reach, 80.0)
+        step = max(round(half / 8.0 / 5.0) * 5.0, 10.0)  # ~8 divisions, 5 mm snap
+        extras.append(_xy_grid(half_mm=half, step_mm=step, z=0.0))
     if show_obb and len(pcd.points) >= 4:
         try:
             obb = pcd.get_oriented_bounding_box(robust=True)
@@ -114,8 +165,10 @@ def _show(
     title: str,
     point_size: float,
     show_obb: bool,
+    show_grid: bool,
     outlier_nb: int,
     outlier_std: float,
+    T_cad=None,
 ) -> None:
     import open3d as o3d
 
@@ -147,7 +200,9 @@ def _show(
 
             vis.register_key_callback(ord("C"), _toggle)
             vis.register_key_callback(ord("c"), _toggle)
-        for geometry in _geometries(scene, show_obb=show_obb):
+        for geometry in _geometries(
+            scene, show_obb=show_obb, show_grid=show_grid, T_cad=T_cad
+        ):
             vis.add_geometry(geometry)
         options = vis.get_render_option()
         options.point_size = point_size
@@ -172,6 +227,11 @@ def main() -> None:
     parser.add_argument("--point-size", type=float, default=4.0)
     parser.add_argument("--no-obb", action="store_true")
     parser.add_argument(
+        "--no-grid",
+        action="store_true",
+        help="XY 평면(z=0) 그리드 끄기",
+    )
+    parser.add_argument(
         "--no-outlier",
         action="store_true",
         help="회색 점 statistical outlier 제거 끄기",
@@ -183,6 +243,11 @@ def main() -> None:
         help="작을수록 더 많이 지움. 0이면 끄기",
     )
     parser.add_argument("--outlier-nb", type=int, default=20)
+    parser.add_argument(
+        "--cad-T",
+        default=None,
+        help="CAD 4x4 (16숫자). 있으면 CAD 축을 추가로 그림. 원점 축·z=0 격자는 유지",
+    )
     args = parser.parse_args()
 
     path = args.ply or _latest_ply()
@@ -197,6 +262,13 @@ def main() -> None:
             "  pip install open3d"
         ) from exc
 
+    T_cad = None
+    if args.cad_T:
+        vals = [float(x) for x in str(args.cad_T).replace(",", " ").split()]
+        if len(vals) != 16:
+            raise SystemExit(f"--cad-T 는 16개 숫자여야 합니다. 지금 {len(vals)}개")
+        T_cad = np.asarray(vals, dtype=np.float64).reshape(4, 4)
+
     pcd = o3d.io.read_point_cloud(str(path))
     print(path, "points", len(pcd.points))
     _show(
@@ -204,8 +276,10 @@ def main() -> None:
         title=str(path),
         point_size=args.point_size,
         show_obb=not args.no_obb,
+        show_grid=not args.no_grid,
         outlier_nb=args.outlier_nb,
         outlier_std=0.0 if args.no_outlier else float(args.outlier_std),
+        T_cad=T_cad,
     )
 
 

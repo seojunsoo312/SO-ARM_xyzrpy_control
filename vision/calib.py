@@ -59,11 +59,12 @@ def intrinsics_for_rotate180(
 
 
 def load_T_base_cam(path: Path | None = None) -> tuple[np.ndarray, Path]:
+    """T_base_cam in project base (URDF Rz180°). Re-run hand-eye after frame change."""
     source = path or HANDEYE_JSON
     if not source.is_file():
         raise FileNotFoundError(
             f"eye_to_hand.json 없음: {source}\n"
-            "SO-ARM 베이스 기준으로 손-눈을 다시 구한 뒤 이 경로에 저장하세요."
+            "프로젝트 베이스(URDF Rz180°)로 손-눈을 다시 구한 뒤 이 경로에 저장하세요."
         )
     data = json.loads(source.read_text(encoding="utf-8"))
     T = np.array(data["T_base_cam"], dtype=np.float64)

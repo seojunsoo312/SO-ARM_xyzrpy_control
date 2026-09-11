@@ -62,6 +62,11 @@ JOINT_SIGN = {
     "S7": -1.0,  # GUI + opens (CAD toward GRIPPER_OPEN_CAD_DEG)
 }
 
+# Pendant (user) soft limits. Missing key = unbounded (S7 uses gripper CAD span).
+JOINT_LIMIT_USER_DEG: dict[str, tuple[float, float]] = {
+    "S6": (-165.0, 165.0),  # wrist_roll
+}
+
 # User-space HOME (deg). 0 = JOINT_ZERO_OFFSET_DEG in the URDF.
 # Calib Enter at the L-pose makes user 0 that pose; do not add an extra S5 shift.
 # Gripper HOME user 0 = pendant 50 (half-open); CAD is midway to GRIPPER_OPEN_CAD_DEG.
@@ -105,7 +110,7 @@ HOLD_DEADBAND_M = 0.002  # 2 mm. Tight hold on unused axes made S1/S4 hunt.
 TILT_DEADBAND_RAD = 0.004
 MAX_DQ_ITER_RAD = 1.5 * DEG2RAD
 MAX_DQ_FRAME_RAD = 5.0 * DEG2RAD
-DLS_LAMBDA = 2.0  # mm-equivalent. Higher → less nullspace chatter (S1/S4 on X).
+DLS_LAMBDA = 3.0  # mm-equivalent. Higher → less nullspace chatter (S1/S4 on X).
 DLS_LAMBDA_PRI = 0.4
 TILT_MM_PER_RAD = 80.0
 TILT_WEIGHT = 1.0
@@ -390,12 +395,19 @@ class RobotKinematics:
         return out
 
     def clamp_q(self, q: np.ndarray) -> np.ndarray:
-        """Clip gripper to closed–open CAD; other joints unbounded."""
+        """Clip gripper CAD span and any JOINT_LIMIT_USER_DEG joints."""
         q = np.asarray(q, dtype=float).copy()
         i = self._q_index[GRIPPER_JOINT]
         lo = min(GRIPPER_CLOSED_CAD_DEG, GRIPPER_OPEN_CAD_DEG) * DEG2RAD
         hi = max(GRIPPER_CLOSED_CAD_DEG, GRIPPER_OPEN_CAD_DEG) * DEG2RAD
         q[i] = float(np.clip(q[i], lo, hi))
+        for name, (user_lo, user_hi) in JOINT_LIMIT_USER_DEG.items():
+            j = self._q_index[name]
+            cad = float(q[j] * RAD2DEG)
+            user = JOINT_SIGN[name] * (cad - JOINT_ZERO_OFFSET_DEG[name])
+            user = float(np.clip(user, user_lo, user_hi))
+            cad = JOINT_ZERO_OFFSET_DEG[name] + JOINT_SIGN[name] * user
+            q[j] = cad * DEG2RAD
         return q
 
     def q_home(self) -> np.ndarray:

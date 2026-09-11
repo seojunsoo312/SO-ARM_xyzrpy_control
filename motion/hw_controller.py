@@ -20,6 +20,8 @@ GRIPPER_MID = 50.0
 DEFAULT_PORT = "/dev/so101_follower"
 DEFAULT_ROBOT_ID = "follower"
 SO_FOLLOWER_NAME = "so_follower"
+# Feetech Max_Torque_Limit / Torque_Limit: 0–1000 = 0–100%.
+TORQUE_LIMIT_UNITS = 1000
 BUNDLED_CALIBRATION_DIR = (
     Path(__file__).resolve().parent.parent / "pendant" / "calibration" / "so_follower"
 )
@@ -240,6 +242,27 @@ class Hardware:
         action = self._user_to_bus(kin.joints_deg(q))
         with self._lock:
             robot.send_action(action)
+
+    def set_torque_pct(self, urdf_name: str, pct: float) -> None:
+        """Live torque cap. 0–100% → Feetech 0–1000. EEPROM unlock only for that motor."""
+        if urdf_name not in LEROBOT_FROM_URDF:
+            raise KeyError(urdf_name)
+        robot = self._robot
+        if robot is None or not self.is_connected:
+            return
+        ticks = int(np.clip(round(float(pct) * 10.0), 1, TORQUE_LIMIT_UNITS))
+        motor = LEROBOT_FROM_URDF[urdf_name]
+        with self._lock:
+            robot.bus.write("Lock", motor, 0, normalize=False)
+            try:
+                robot.bus.write("Max_Torque_Limit", motor, ticks, normalize=False)
+                robot.bus.write("Torque_Limit", motor, ticks, normalize=False)
+            finally:
+                robot.bus.write("Lock", motor, 1, normalize=False)
+
+    def apply_torque_pcts(self, pcts: dict[str, float]) -> None:
+        for name, pct in pcts.items():
+            self.set_torque_pct(name, pct)
 
     def _bus_to_user(self, obs: dict) -> dict[str, float]:
         user: dict[str, float] = {}
