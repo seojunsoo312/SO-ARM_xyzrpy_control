@@ -58,16 +58,30 @@ def intrinsics_for_rotate180(
     return k_rot, d_rot
 
 
+# Legacy project_rz180 → current +X-forward (same as motion.base_frame.R_USER_FROM_LEGACY).
+_R_USER_FROM_RZ180 = np.array(
+    [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+    dtype=np.float64,
+)
+
+
 def load_T_base_cam(path: Path | None = None) -> tuple[np.ndarray, Path]:
-    """T_base_cam in project base (URDF Rz180°). Re-run hand-eye after frame change."""
+    """T_base_cam in the current project base (+X forward)."""
     source = path or HANDEYE_JSON
     if not source.is_file():
         raise FileNotFoundError(
             f"eye_to_hand.json 없음: {source}\n"
-            "프로젝트 베이스(URDF Rz180°)로 손-눈을 다시 구한 뒤 이 경로에 저장하세요."
+            "프로젝트 베이스(+X 전진)로 손-눈을 다시 구한 뒤 이 경로에 저장하세요."
         )
     data = json.loads(source.read_text(encoding="utf-8"))
     T = np.array(data["T_base_cam"], dtype=np.float64)
+    frame = (data.get("base_frame") or "project_rz180").strip()
+    if frame == "project_rz180":
+        out = np.eye(4, dtype=np.float64)
+        out[:3, :3] = _R_USER_FROM_RZ180
+        T = out @ T
+    elif frame != "project_xfwd":
+        raise ValueError(f"unknown base_frame in {source}: {frame!r}")
     return T, source
 
 

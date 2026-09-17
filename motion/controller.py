@@ -11,6 +11,7 @@ import pinocchio as pin
 
 from motion.base_frame import (
     R_URDF_FROM_USER,
+    USER_BASE_FRAME,
     ee_target_urdf_from_user,
     tcp_pose_user_from_urdf,
     xyz_user_from_urdf,
@@ -32,7 +33,8 @@ from motion.robot_kinematics import (
 )
 
 FPS = 30
-JOINT_VEL_DEG_S = 20.0
+JOINT_VEL_DEG_S = 45.0  # displayed 100%
+JOINT_VEL_MIN_DEG_S = 8.0  # displayed 10% (former 40% of 20°/s)
 GRIPPER_VEL_UNIT_S = 40.0
 JOG_VEL_MPS = 0.010  # default XYZ jog; GUI slider 5–15 mm/s
 JOG_VEL_MIN_MPS = 0.005
@@ -45,17 +47,46 @@ TORQUE_PCT_MIN = 10.0
 TORQUE_PCT_MAX = 100.0
 DEFAULT_ARM_TORQUE_PCT = 100.0
 DEFAULT_GRIPPER_TORQUE_PCT = 50.0
+SPEED_PCT_MIN = 10.0
+SPEED_PCT_MAX = 100.0
+DEFAULT_SPEED_PCT = 50.0
+# Displayed 10% == former 40% override; displayed 100% == former 150%.
+SPEED_SCALE_AT_MIN = 0.40
+SPEED_SCALE_AT_MAX = 1.50
+SPEED_PRESETS = (("느림", 10.0), ("보통", 50.0), ("빠름", 100.0))
 MAX_TARGET_LEAD_M = 0.012  # 12 mm vs measured TCP (real). Sub-tick goals never move STS3215.
 # q_send = (1-β) q_prev + β q_ik. Smaller β = less shake, more lag.
 CART_IK_BLEND = 0.28
 GOTO_DURATION_S = 2.5
 GOTO_MIN_S = 0.2
 GOTO_MAX_S = 30.0
-Z_FLOOR_M = 0.0
+GOTO_SETTLE_POS_M = 0.0008  # 0.8 mm — EE go-to keeps IK until TCP is on the goal
+GOTO_SETTLE_MAX_S = 2.5
+GOTO_SETTLE_IK_LOOPS = 4
+# EE go-to: if the straight TCP line would hit the column (L1 = J1–J2), lift first.
+GOTO_LIFT_MIN_Z_M = 0.12
+GOTO_LIFT_CLEAR_M = 0.04
+GOTO_LIFT_SKIP_M = 0.005
+GOTO_PATH_CHECK_N = 10
 
 CART_AXES = ("x", "y", "z", "wx", "wy", "wz")
 ROT_FRAME_BASE = "base"
 ROT_FRAME_TCP = "tcp"
+
+
+def _speed_pct_t(pct: float) -> float:
+    span = SPEED_PCT_MAX - SPEED_PCT_MIN
+    return (float(np.clip(pct, SPEED_PCT_MIN, SPEED_PCT_MAX)) - SPEED_PCT_MIN) / span
+
+
+def speed_pct_to_scale(pct: float) -> float:
+    t = _speed_pct_t(pct)
+    return SPEED_SCALE_AT_MIN + t * (SPEED_SCALE_AT_MAX - SPEED_SCALE_AT_MIN)
+
+
+def speed_pct_to_joint_vel(pct: float) -> float:
+    t = _speed_pct_t(pct)
+    return JOINT_VEL_MIN_DEG_S + t * (JOINT_VEL_DEG_S - JOINT_VEL_MIN_DEG_S)
 
 
 @dataclass(frozen=True)
@@ -87,6 +118,7 @@ class Controller:
         self._target_rot: np.ndarray | None = None
         self._fault = ""
         self._goto: dict | None = None
+        self._interrupt_id = 0
         self._mode = "virtual"
         self._rot_frame = ROT_FRAME_BASE
         self._q_meas: np.ndarray | None = None
@@ -97,6 +129,7 @@ class Controller:
         self._pose_server: PoseServer | None = None
         self._jog_vel_mps = float(JOG_VEL_MPS)
         self._jog_rot_rad_s = float(JOG_ROT_RAD_S)
+        self._speed_pct = float(DEFAULT_SPEED_PCT)
         self._torque_pct = {
             name: (
                 DEFAULT_GRIPPER_TORQUE_PCT
@@ -138,6 +171,8 @@ class Controller:
             if sign != 0 and self._frozen_unlocked():
                 return
             self._goto = None
+            if sign != 0:
+                self._interrupt_id += 1
             self._joint_jog[joint] = int(np.sign(sign))
             if sign != 0:
                 self._reset_cart_targets()
@@ -161,6 +196,22 @@ class Controller:
     def rpy_jog_deg_s(self) -> float:
         with self._lock:
             return self._jog_rot_rad_s / DEG2RAD
+
+    def set_speed_pct(self, pct: float) -> None:
+        value = float(np.clip(pct, SPEED_PCT_MIN, SPEED_PCT_MAX))
+        with self._lock:
+            self._speed_pct = value
+
+    def speed_pct(self) -> float:
+        with self._lock:
+            return float(self._speed_pct)
+
+    def speed_scale(self) -> float:
+        with self._lock:
+            return self._speed_scale_unlocked()
+
+    def _speed_scale_unlocked(self) -> float:
+        return speed_pct_to_scale(self._speed_pct)
 
     def set_joint_torque_pct(self, joint: str, pct: float) -> None:
         if joint not in self._torque_pct:
@@ -216,6 +267,8 @@ class Controller:
             if sign != 0 and self._frozen_unlocked():
                 return
             self._goto = None
+            if sign != 0:
+                self._interrupt_id += 1
             self._cart_jog[axis] = int(np.sign(sign))
             if not any(self._cart_jog.values()):
                 self._reset_cart_targets()
@@ -229,10 +282,19 @@ class Controller:
                 self._cart_jog[name] = 0
             self._reset_cart_targets()
 
+    def interrupt_id(self) -> int:
+        with self._lock:
+            return int(self._interrupt_id)
+
     def stop_all(self) -> None:
         with self._lock:
+            self._interrupt_id += 1
             self._clear_motion_unlocked()
             self._fault = ""
+
+    def goto_active(self) -> bool:
+        with self._lock:
+            return self._goto is not None
 
     def home(self) -> None:
         self.start_joint_goto(dict(HOME_JOINTS_DEG))
@@ -318,6 +380,7 @@ class Controller:
 
     def estop(self, reason: str = "E-stop — torque off") -> None:
         with self._lock:
+            self._interrupt_id += 1
             self._clear_motion_unlocked()
             self._fault = reason
         if self._hw is not None and self._hw.is_connected:
@@ -336,37 +399,48 @@ class Controller:
         lin_mps: float | None = None,
         rot_deg_s: float | None = None,
     ) -> float:
-        """Go-to TCP. xyz/rpy are project base (URDF Rz180°), not raw URDF.
+        """Go-to TCP. xyz/rpy are project base (+X forward), not raw URDF.
 
-        기본 시간은 XYZ/RPY 조그 속도. duration_s 를 주면 그 시간을 쓴다.
+        기본 시간은 XYZ/RPY 조그 속도 × 속도%. duration_s 를 주면 그 시간을 쓴다.
         lin_mps / rot_deg_s 를 주면 조그 속도 대신 그 값으로 시간을 잡는다.
         """
         xyz1, R1 = ee_target_urdf_from_user(xyz_mm, rpy_deg)
         with self._lock:
             if self._frozen_unlocked():
                 return 0.0
+            self._interrupt_id += 1
             self._clear_motion_unlocked()
             xyz0 = self._pose.xyz_m.copy()
             R0 = self._pose.rotation.copy()
+            q = self._q.copy()
+            lift = self._ee_straight_hits_unlocked(q, xyz0, R0, xyz1, R1)
+            legs = self._ee_legs_unlocked(
+                xyz0,
+                R0,
+                xyz1,
+                R1,
+                lift=lift,
+                lin_mps=lin_mps,
+                rot_deg_s=rot_deg_s,
+            )
+            first, rest = legs[0], legs[1:]
+            duration_s_sum = float(sum(leg["duration_s"] for leg in legs))
             if duration_s is None:
-                duration_s = self._ee_goto_duration_unlocked(
-                    xyz0,
-                    R0,
-                    xyz1,
-                    R1,
-                    lin_mps=lin_mps,
-                    rot_deg_s=rot_deg_s,
-                )
+                duration_s = duration_s_sum
             duration_s = float(np.clip(duration_s, GOTO_MIN_S, GOTO_MAX_S))
-            self._goto = {
-                "kind": "ee",
-                "i": 0,
-                "n": max(int(duration_s * FPS), 1),
-                "xyz0": xyz0,
-                "R0": R0,
-                "xyz1": xyz1,
-                "R1": R1,
-            }
+            if duration_s_sum > 1e-9 and abs(duration_s - duration_s_sum) > 1e-9:
+                scale = duration_s / duration_s_sum
+                for leg in legs:
+                    leg["duration_s"] = float(leg["duration_s"]) * scale
+                    leg["n"] = max(int(leg["duration_s"] * FPS), 1)
+                first, rest = legs[0], legs[1:]
+            self._goto = self._ee_goto_from_leg(
+                first,
+                queue=rest,
+                final_xyz=xyz1,
+                final_R=R1,
+                lifted=lift,
+            )
             self._fault = ""
         return duration_s
 
@@ -376,10 +450,11 @@ class Controller:
         *,
         duration_s: float | None = None,
     ) -> float:
-        """관절 go-to. 기본 시간은 관절별 토크% × 조그 각속도."""
+        """관절 go-to. 기본 시간은 조그 각속도 × 속도%."""
         with self._lock:
             if self._frozen_unlocked():
                 return 0.0
+            self._interrupt_id += 1
             self._clear_motion_unlocked()
             q1 = self._kin.q_from_deg(joints_deg)
             q0 = self._q.copy()
@@ -400,6 +475,36 @@ class Controller:
             self._fault = ""
         return duration_s
 
+    def start_ee_goto_joints(
+        self,
+        xyz_mm: np.ndarray,
+        rpy_deg: np.ndarray,
+        *,
+        duration_s: float | None = None,
+    ) -> float:
+        """TCP 목표까지 IK 한 뒤 관절 보간. TCP 직선은 쓰지 않는다.
+
+        드롭 XY처럼 같은 자세로 가로지를 때 그리퍼가 팔 링크와 겹치는 경로를 피한다.
+        """
+        xyz1, R1 = ee_target_urdf_from_user(xyz_mm, rpy_deg)
+        with self._lock:
+            if self._frozen_unlocked():
+                return 0.0
+            q = self._q.copy()
+        for _ in range(24):
+            q = self._kin.clamp_q(
+                self._kin.servo_toward(q, xyz1, R_ref=R1, ori_weight=1.0)
+            )
+        pose = self._kin.forward_tcp(q)
+        err = float(np.linalg.norm(pose.xyz_m - xyz1))
+        if err > 0.015:
+            with self._lock:
+                self._interrupt_id += 1
+                self._clear_motion_unlocked()
+                self._fault = f"IK 실패 ({err * 1000.0:.0f} mm)"
+            return 0.0
+        return self.start_joint_goto(self._kin.joints_deg(q), duration_s=duration_s)
+
     def _ee_goto_duration_unlocked(
         self,
         xyz0: np.ndarray,
@@ -410,13 +515,134 @@ class Controller:
         lin_mps: float | None = None,
         rot_deg_s: float | None = None,
     ) -> float:
+        scale = self._speed_scale_unlocked()
         lin = float(self._jog_vel_mps if lin_mps is None else lin_mps)
         rot = float(self._jog_rot_rad_s if rot_deg_s is None else (rot_deg_s * DEG2RAD))
+        if lin_mps is None:
+            lin *= scale
+        if rot_deg_s is None:
+            rot *= scale
         dist = float(np.linalg.norm(np.asarray(xyz1, dtype=float) - np.asarray(xyz0, dtype=float)))
         t_lin = dist / max(lin, 1e-6)
         ang = float(np.linalg.norm(pin.log3(np.asarray(R0, dtype=float).T @ np.asarray(R1, dtype=float))))
         t_rot = ang / max(rot, 1e-9)
         return max(t_lin, t_rot, GOTO_MIN_S)
+
+    def _ee_straight_hits_unlocked(
+        self,
+        q: np.ndarray,
+        xyz0: np.ndarray,
+        R0: np.ndarray,
+        xyz1: np.ndarray,
+        R1: np.ndarray,
+    ) -> bool:
+        qk = np.asarray(q, dtype=float).copy()
+        n = GOTO_PATH_CHECK_N
+        for i in range(1, n + 1):
+            a = i / n
+            xyz = (1.0 - a) * xyz0 + a * xyz1
+            R = R0 @ pin.exp3(a * pin.log3(R0.T @ R1))
+            qk = self._kin.clamp_q(
+                self._kin.servo_toward(qk, xyz, R_ref=R, ori_weight=1.0)
+            )
+            if self._kin.in_collision(qk):
+                return True
+        return False
+
+    def _ee_legs_unlocked(
+        self,
+        xyz0: np.ndarray,
+        R0: np.ndarray,
+        xyz1: np.ndarray,
+        R1: np.ndarray,
+        *,
+        lift: bool,
+        lin_mps: float | None,
+        rot_deg_s: float | None,
+    ) -> list[dict]:
+        if not lift:
+            return [
+                self._ee_leg_unlocked(
+                    xyz0, R0, xyz1, R1, lin_mps=lin_mps, rot_deg_s=rot_deg_s
+                )
+            ]
+        z0 = float(xyz0[2])
+        z1 = float(xyz1[2])
+        z_via = max(z0, z1, GOTO_LIFT_MIN_Z_M) + GOTO_LIFT_CLEAR_M
+        via0 = np.array([float(xyz0[0]), float(xyz0[1]), z_via], dtype=float)
+        via1 = np.array([float(xyz1[0]), float(xyz1[1]), z_via], dtype=float)
+        pts = [
+            (xyz0, R0, False),
+            (via0, R0, True),
+            (via1, R1, False),
+            (xyz1, R1, False),
+        ]
+        legs: list[dict] = []
+        for (p0, r0, _s0), (p1, r1, lift_seg) in zip(pts, pts[1:]):
+            dp = float(np.linalg.norm(p1 - p0))
+            dang = float(np.linalg.norm(pin.log3(r0.T @ r1)))
+            if dp < GOTO_LIFT_SKIP_M and dang < 0.02:
+                continue
+            leg = self._ee_leg_unlocked(
+                p0, r0, p1, r1, lin_mps=lin_mps, rot_deg_s=rot_deg_s, lift_seg=lift_seg
+            )
+            legs.append(leg)
+        if not legs:
+            return [
+                self._ee_leg_unlocked(
+                    xyz0, R0, xyz1, R1, lin_mps=lin_mps, rot_deg_s=rot_deg_s
+                )
+            ]
+        return legs
+
+    def _ee_leg_unlocked(
+        self,
+        xyz0: np.ndarray,
+        R0: np.ndarray,
+        xyz1: np.ndarray,
+        R1: np.ndarray,
+        *,
+        lin_mps: float | None,
+        rot_deg_s: float | None,
+        lift_seg: bool = False,
+    ) -> dict:
+        duration_s = self._ee_goto_duration_unlocked(
+            xyz0, R0, xyz1, R1, lin_mps=lin_mps, rot_deg_s=rot_deg_s
+        )
+        duration_s = float(np.clip(duration_s, GOTO_MIN_S, GOTO_MAX_S))
+        return {
+            "xyz0": np.asarray(xyz0, dtype=float).copy(),
+            "R0": np.asarray(R0, dtype=float).copy(),
+            "xyz1": np.asarray(xyz1, dtype=float).copy(),
+            "R1": np.asarray(R1, dtype=float).copy(),
+            "n": max(int(duration_s * FPS), 1),
+            "duration_s": duration_s,
+            "lift_seg": bool(lift_seg),
+        }
+
+    def _ee_goto_from_leg(
+        self,
+        leg: dict,
+        *,
+        queue: list[dict],
+        final_xyz: np.ndarray,
+        final_R: np.ndarray,
+        lifted: bool,
+    ) -> dict:
+        return {
+            "kind": "ee",
+            "i": 0,
+            "n": int(leg["n"]),
+            "xyz0": leg["xyz0"],
+            "R0": leg["R0"],
+            "xyz1": leg["xyz1"],
+            "R1": leg["R1"],
+            "queue": list(queue),
+            "final_xyz": np.asarray(final_xyz, dtype=float).copy(),
+            "final_R": np.asarray(final_R, dtype=float).copy(),
+            "lifted": bool(lifted),
+            "lift_seg": bool(leg.get("lift_seg")),
+        }
 
     def _joint_goto_duration_unlocked(self, q0: np.ndarray, q1: np.ndarray) -> float:
         t_max = GOTO_MIN_S
@@ -428,10 +654,9 @@ class Controller:
                 continue
             if name == GRIPPER_JOINT:
                 vel_deg_s = (grip_span / 100.0) * GRIPPER_VEL_UNIT_S
+                vel = max(vel_deg_s * self._speed_scale_unlocked(), 1e-3)
             else:
-                vel_deg_s = JOINT_VEL_DEG_S
-            scale = float(self._torque_pct[name]) / 100.0
-            vel = max(vel_deg_s * scale, 1e-3)
+                vel = max(speed_pct_to_joint_vel(self._speed_pct), 1e-3)
             t_max = max(t_max, dq_deg / vel)
         return t_max
 
@@ -461,7 +686,7 @@ class Controller:
         )
 
     def handeye_payload(self) -> dict:
-        """Measured TCP in project base (Rz180°). Fallback = commanded pose."""
+        """Measured TCP in project base (+X forward). Fallback = commanded pose."""
         with self._lock:
             q = self._q_meas.copy() if self._q_meas is not None else self._q.copy()
             pose_u = self._pose_meas if self._pose_meas is not None else self._pose
@@ -484,7 +709,7 @@ class Controller:
             "mode": mode,
             "fault": fault,
             "gripper_frame": TCP_FRAME,
-            "base_frame": "project_rz180",
+            "base_frame": USER_BASE_FRAME,
             "joints_deg": {k: float(v) for k, v in self._kin.joints_deg(q).items()},
             "tcp_xyz_mm": np.asarray(pose.xyz_mm, dtype=float).tolist(),
             "tcp_rpy_deg": np.asarray(pose.rpy_deg, dtype=float).tolist(),
@@ -529,12 +754,6 @@ class Controller:
         if entering and not (allow_lift_escape and lifting):
             with self._lock:
                 self._fault = "collision — step ignored"
-                if rewind_cart:
-                    self._reset_cart_targets()
-            return False
-        if pose.xyz_m[2] < Z_FLOOR_M and z_now >= Z_FLOOR_M:
-            with self._lock:
-                self._fault = "floor — step ignored"
                 if rewind_cart:
                     self._reset_cart_targets()
             return False
@@ -609,36 +828,110 @@ class Controller:
             xyz1 = g.get("xyz1")
             R0 = g.get("R0")
             R1 = g.get("R1")
+            lift_seg = bool(g.get("lift_seg"))
+            lifted = bool(g.get("lifted"))
+            queue = list(g.get("queue") or [])
+            final_xyz = g.get("final_xyz", xyz1)
+            final_R = g.get("final_R", R1)
         if kind == "joint":
             q_next = (1.0 - a) * q0 + a * q1
         else:
             xyz = (1.0 - a) * xyz0 + a * xyz1
             R = R0 @ pin.exp3(a * pin.log3(R0.T @ R1))
-            q_next = self._kin.servo_toward(q, xyz, R_ref=R, ori_weight=1.0)
-        ok = self._commit(q_next, allow_lift_escape=False)
+            s6_sat = self._kin.s6_at_limit(q)
+            if a >= 1.0:
+                ori_w = 0.0 if s6_sat else 0.35
+            else:
+                ori_w = 0.15 if s6_sat else 1.0
+            loops = 1 if a < 1.0 else GOTO_SETTLE_IK_LOOPS
+            q_next = q
+            for _ in range(loops):
+                q_next = self._kin.servo_toward(q_next, xyz, R_ref=R, ori_weight=ori_w)
+        ok = self._commit(q_next, allow_lift_escape=lift_seg)
         with self._lock:
             if self._goto is None:
                 return
             if not ok:
+                if kind == "ee" and not lifted:
+                    pose = self._pose
+                    legs = self._ee_legs_unlocked(
+                        pose.xyz_m,
+                        pose.rotation,
+                        np.asarray(final_xyz, dtype=float),
+                        np.asarray(final_R, dtype=float),
+                        lift=True,
+                        lin_mps=None,
+                        rot_deg_s=None,
+                    )
+                    self._goto = self._ee_goto_from_leg(
+                        legs[0],
+                        queue=legs[1:],
+                        final_xyz=final_xyz,
+                        final_R=final_R,
+                        lifted=True,
+                    )
+                    self._fault = ""
+                    return
                 self._goto = None
                 if not self._fault:
                     self._fault = "go-to blocked"
-            elif i >= n:
+                return
+            if kind == "ee":
+                is_last = len(queue) == 0
+                if not is_last:
+                    if i >= n:
+                        nxt = queue[0]
+                        pose = self._pose
+                        nxt = dict(nxt)
+                        nxt["xyz0"] = pose.xyz_m.copy()
+                        nxt["R0"] = pose.rotation.copy()
+                        self._goto = self._ee_goto_from_leg(
+                            nxt,
+                            queue=queue[1:],
+                            final_xyz=final_xyz,
+                            final_R=final_R,
+                            lifted=lifted,
+                        )
+                    else:
+                        self._goto["i"] = i
+                    return
+                settled, err_mm = self._ee_at_goal_unlocked(final_xyz, final_R)
+                max_i = n + int(GOTO_SETTLE_MAX_S * FPS)
+                if settled:
+                    self._goto = None
+                    self._fault = ""
+                elif i >= max_i:
+                    self._goto = None
+                    self._fault = f"go-to leftover {err_mm:.1f} mm"
+                else:
+                    self._goto["i"] = i
+                return
+            if i >= n:
                 self._goto = None
                 self._fault = ""
             else:
                 self._goto["i"] = i
 
+    def _ee_at_goal_unlocked(
+        self, xyz1: np.ndarray, R1: np.ndarray
+    ) -> tuple[bool, float]:
+        pose = self._kin.forward_tcp(self._q)
+        err_p = float(np.linalg.norm(pose.xyz_m - np.asarray(xyz1, dtype=float)))
+        return bool(err_p < GOTO_SETTLE_POS_M), err_p * 1000.0
+
     def _joint_step(self, dt: float, q: np.ndarray, joint_jog: dict[str, int]) -> None:
+        with self._lock:
+            scale = self._speed_scale_unlocked()
+            joint_vel = speed_pct_to_joint_vel(self._speed_pct)
         dq = np.zeros_like(q)
         for name, sign in joint_jog.items():
             if sign == 0:
                 continue
             if name == GRIPPER_JOINT:
                 span = abs(GRIPPER_OPEN_CAD_DEG - GRIPPER_CLOSED_CAD_DEG)
-                vel = (span / 100.0) * GRIPPER_VEL_UNIT_S
+                vel = (span / 100.0) * GRIPPER_VEL_UNIT_S * scale
             else:
-                vel = JOINT_VEL_DEG_S
+                vel = joint_vel
             dq[self._kin.q_index(name)] = JOINT_SIGN[name] * sign * vel * DEG2RAD * dt
         self._commit(q + dq)
 
@@ -647,8 +940,9 @@ class Controller:
         translating = any(cart_jog[k] for k in ("x", "y", "z"))
         rotating = any(cart_jog[k] for k in ("wx", "wy", "wz"))
         with self._lock:
-            jog_vel = float(self._jog_vel_mps)
-            jog_rot = float(self._jog_rot_rad_s)
+            scale = self._speed_scale_unlocked()
+            jog_vel = float(self._jog_vel_mps) * scale
+            jog_rot = float(self._jog_rot_rad_s) * scale
             meas_xyz = (
                 None
                 if self._mode != "real" or self._pose_meas is None
@@ -657,7 +951,7 @@ class Controller:
             if self._target_xyz is None or self._target_rot is None:
                 self._target_xyz = pose.xyz_m.copy()
                 self._target_rot = pose.rotation.copy()
-            # XYZ jog buttons are project base (Rz180°); IK targets stay URDF.
+            # XYZ jog buttons are project base (+X forward); IK targets stay URDF.
             v_user = np.array([cart_jog["x"], cart_jog["y"], cart_jog["z"]], dtype=float)
             self._target_xyz = self._target_xyz + jog_vel * dt * (R_URDF_FROM_USER @ v_user)
             # Cap vs the arm, not vs q_cmd. IK must keep accumulating on q_cmd
@@ -683,7 +977,7 @@ class Controller:
                     # Body / TCP-local: Roll→TCP X, Pitch→TCP Y, Yaw→TCP Z.
                     self._target_rot = self._target_rot @ pin.exp3(w_user)
                 else:
-                    # Project base axes (Rz180° of URDF).
+                    # Project base axes (+X forward of URDF Rz(-90°)).
                     w = R_URDF_FROM_USER @ w_user
                     self._target_rot = pin.exp3(w) @ self._target_rot
             xyz = self._target_xyz.copy()

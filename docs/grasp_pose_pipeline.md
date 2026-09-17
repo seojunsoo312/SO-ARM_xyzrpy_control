@@ -77,7 +77,7 @@ YOLOv8-Pose + PnP 는 폐기한다. 모서리 키포인트 라벨·별도 학습
 
 - 책상 RANSAC = 바닥 제거, 작업 공간 높이 범위.
 - 카메라 프레임 고정. `p_base = T_base_cam * p_cam`. `apply_T` 는 `vision.transforms` 만.
-- 프로젝트 베이스 = URDF 월드의 `Rz(180°)` (`motion/base_frame.py`). 조그·place·손눈·`--base` 숫자가 이 프레임.
+- 프로젝트 베이스 = +X 전진, +Z 위, +Y 왼쪽 (`motion/base_frame.py`, URDF `Rz(-90°)`). 조그·place·손눈·`--base` 숫자가 이 프레임.
 - 인식은 `yolo/`, 조그는 펜던트. 한 창에 넣지 않는다.
 - 집기는 pre-grasp (목표보다 Z+40–50 mm) 후 하강.
 - 등록 입력은 **선택한 인스턴스 점군만**.
@@ -177,11 +177,11 @@ RGB-D (Orbbec SDK, 640×480, 컬러·뎁스 동일 180° 회전)
 
 ### 3.5 로컬 윗면 (디버그·폴백)
 
-이미 `grasp_pose.local_pose` 에 있다. 등록이 실패하거나 CAD가 잠깐 없을 때 화면에만 쓴다. 로봇 명령의 정본이 아니다.
+이미 `yolo.pose.debug.local_plane.local_pose` 에 있다. 등록이 실패하거나 CAD가 잠깐 없을 때 화면에만 쓴다. 로봇 명령의 정본이 아니다.
 
-### 3.6 2D 경로 (정본 아님)
+### 3.6 2D 경로 (삭제)
 
-`yolo/2D_pose.ipynb`. 마스크 PCA + 광선 교차. 같은 프레임 Δ 비교용. 로봇에는 안 보냄.
+`2D_pose.ipynb` 는 지웠다. 마스크 PCA + 광선 교차는 쓰지 않는다.
 
 ### 3.7 집기
 
@@ -197,7 +197,8 @@ RGB-D (Orbbec SDK, 640×480, 컬러·뎁스 동일 180° 회전)
 
 ## 4. 모듈과 파일
 
-인식·점군·등록은 `yolo/` 에 둔다. 실행 진입은 `roi_cloud.py` (확인) 와 나중의 `pick.py` (동작).
+인식·점군·등록은 `yolo/` 에 둔다. 학습 스크립트는 `yolo/train/`, 점군·등록은 `yolo/pose/`.  
+실행 진입은 `yolo/pose/roi_cloud.py` (확인) 와 나중의 `pick.py` (동작).
 
 ```text
 Project/
@@ -208,15 +209,17 @@ Project/
 │   └── calib_data/               # K, T_base_cam
 ├── motion/
 ├── pendant/
+│   └── teach_grasp.py            # Meshcat 집기 티칭 (`main.py --grasp`)
 └── yolo/
-    ├── depth_cloud.py            # 뎁스→점, 책상 RANSAC
-    ├── grasp_pose.py             # 인스턴스 점군 + 최상단 (+ 로컬 면 디버그)
-    ├── register.py               # CAD 로드, FPFH+RANSAC, ICP, xyzrpy
-    ├── roi_cloud.py              # 카메라 루프, 오버레이, ply
-    ├── view_cloud.py
-    ├── 2D_pose.ipynb
-    ├── pick.py                   # 나중
-    ├── cad/                      # 메시/ply (mm). 아직 경로만
+    ├── train/                    # 촬영·라벨·학습·검출
+    ├── pose/
+    │   ├── depth_cloud.py        # 뎁스→점, 책상 RANSAC
+    │   ├── instances.py          # 인스턴스 점군 + 최상단
+    │   ├── register.py           # CAD 로드, FPFH+RANSAC, ICP, xyzrpy
+    │   ├── roi_cloud.py          # 카메라 루프, 오버레이, ply
+    │   ├── debug/local_plane.py  # 로컬 면 PCA (디버그)
+    │   └── view/                 # Open3D 점군·CAD 축 뷰어
+    ├── cad/                      # model.yaml + mesh (mm)
     └── runs/roi/
 ```
 
@@ -229,19 +232,21 @@ Project/
 | ---------------------- | --------------------------- | ------------------ |
 | `vision/calib.py`      | `K`, `T_base_cam` 로드        | 점군 수식              |
 | `vision/transforms.py` | `apply_T`                   | 파일 I/O             |
-| `depth_cloud.py`       | 뎁스→점, 책상 RANSAC, 마스크        | YOLO, `apply_T` 복제 |
-| `grasp_pose.py`        | 인스턴스 점군, 최상단 선택, (디버그) 로컬 면 | 카메라, 시리얼           |
-| `register.py`          | CAD vs ROI → T, xyzrpy      | 검출, 전 장면 FPFH      |
-| `roi_cloud.py`         | 루프, 오버레이, ply, `v`/`s`/`r`  | 학습, 펜던트            |
+| `yolo/pose/depth_cloud.py` | 뎁스→점, 책상 RANSAC, 마스크        | YOLO, `apply_T` 복제 |
+| `yolo/pose/instances.py`  | 인스턴스 점군, 최상단 선택           | 카메라, 시리얼, 포즈 수식     |
+| `yolo/pose/debug/local_plane.py` | (디버그) 로컬 면 PCA            | 로봇 명령                 |
+| `yolo/pose/register.py`    | CAD vs ROI → T, xyzrpy      | 검출, 전 장면 FPFH      |
+| `yolo/pose/roi_cloud.py`   | 루프, 오버레이, ply, `v`/`s`/`r`  | 학습, 펜던트            |
+| `yolo/pose/view/`          | PLY / CAD 축 보기               | 6D 정본                 |
+| `pendant/teach_grasp.py`   | Meshcat 집기 티칭               | YOLO, 카메라            |
 | `pick.py`              | 등록 포즈 + `send_coords` (나중)  | 전용 GUI             |
-| `2D_pose.ipynb`        | 2D 실험                       | 집기 정본              |
 
 
 
 
 ### 4.2 지금 코드 vs 이 수정안
 
-이미 있는 것: 인스턴스 점군, 최상단, 로컬 면 오버레이 (`grasp_pose.py`, `roi_cloud.py`).
+이미 있는 것: 인스턴스 점군, 최상단, 로컬 면 오버레이 (`instances.py`, `debug/local_plane.py`, `roi_cloud.py`).
 
 아직 없는 것: `register.py`, `yolo/cad/` 모델, `roi_cloud` 에 T / xyzrpy 표시.
 
@@ -252,10 +257,10 @@ Project/
 프로젝트 루트, `conda activate lerobot`:
 
 ```bash
-python yolo/detect.py --seg
-python yolo/roi_cloud.py --mask              # ROI + 최상단 (지금은 로컬 면)
-python yolo/roi_cloud.py --mask --base       # 베이스 mm
-# python yolo/roi_cloud.py --mask --cad    # 등록 정본. mesh 는 yolo/cad/model.yaml
+python yolo/train/detect.py --seg
+python yolo/pose/roi_cloud.py --mask              # ROI + 최상단 (지금은 로컬 면)
+python yolo/pose/roi_cloud.py --mask --base       # 베이스 mm
+# python yolo/pose/roi_cloud.py --mask --cad    # 등록 정본. mesh 는 yolo/cad/model.yaml
 # python yolo/pick.py
 ```
 
@@ -271,9 +276,9 @@ python yolo/roi_cloud.py --mask --base       # 베이스 mm
 | 단계  | 산출                              | 실행                            | 선행                |
 | --- | ------------------------------- | ----------------------------- | ----------------- |
 | 5b  | 인스턴스별 점군 (책상 점 제외)              | `roi_cloud.py --mask`         | `K`, 세그, SDK      |
-| 5c  | 최상단(또는 클릭) 인스턴스                 | `grasp_pose.select_topmost`   | 5b                |
+| 5c  | 최상단(또는 클릭) 인스턴스                 | `instances.select_topmost`    | 5b                |
 | 5d  | CAD vs ROI → T, xyzrpy          | `register.py`                 | 5c, CAD(mm)       |
-| 5e  | (디버그) 로컬 면 / 2D PCA             | `local_pose`, `2D_pose.ipynb` | 5c                |
+| 5e  | (디버그) 로컬 면 PCA                 | `debug.local_plane.local_pose` | 5c                |
 | 6   | 책상 `z_desk` (바닥·작업공간)           | 펜던트                           | TCP               |
 | 7   | 집기 프레임 = T 또는 `T @ T_cad_grasp` | 오버레이                          | 5d                |
 | 8   | 작업공간 필터                         | 코드                            | 7                 |

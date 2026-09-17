@@ -1,6 +1,6 @@
-path: datasets/custom
-train: images/train
-val: images/val
+path: /home/junsoo/Project/yolo
+train: datasets/splits/train.txt
+val: datasets/splits/val.txt
 nc: 1
 names:
   0: bracket

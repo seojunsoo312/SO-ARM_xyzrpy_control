@@ -66,13 +66,14 @@ JOINT_SIGN = {
 JOINT_LIMIT_USER_DEG: dict[str, tuple[float, float]] = {
     "S6": (-165.0, 165.0),  # wrist_roll
 }
+S6_LIMIT_MARGIN_DEG = 1.5
 
 # User-space HOME (deg). 0 = JOINT_ZERO_OFFSET_DEG in the URDF.
 # Calib Enter at the L-pose makes user 0 that pose; do not add an extra S5 shift.
 # Gripper HOME user 0 = pendant 50 (half-open); CAD is midway to GRIPPER_OPEN_CAD_DEG.
 HOME_JOINTS_DEG = {name: 0.0 for name in URDF_JOINT_NAMES}
 
-# Pendant "초기자세" — 작업 시작용. S7 user 0 = GUI 0–100 의 50.
+# Pendant "초기자세" — 작업 시작용. S7 user −50 = GUI 0–100 의 0 (완전 닫힘).
 INIT_POSE_JOINTS_DEG = {
     "S1": 0.0,
     "S2": -40.0,
@@ -80,7 +81,18 @@ INIT_POSE_JOINTS_DEG = {
     "S4": 0.0,
     "S5": -90.0,
     "S6": 0.0,
-    "S7": 0.0,
+    "S7": -GRIPPER_USER_MID,
+}
+
+# Pendant [x] rest pose. GUI 0–100 gripper 21.53 → user deg (HOME=50).
+SHUTDOWN_JOINTS_DEG = {
+    "S1": 0.0,
+    "S2": -98.0,
+    "S3": 90.0,
+    "S4": 0.0,
+    "S5": -60.0,
+    "S6": 0.0,
+    "S7": 21.53 - 50.0,
 }
 
 DEG2RAD = np.pi / 180.0
@@ -394,6 +406,11 @@ class RobotKinematics:
                 out[name] = JOINT_SIGN[name] * (cad - JOINT_ZERO_OFFSET_DEG[name])
         return out
 
+    def s6_at_limit(self, q: np.ndarray) -> bool:
+        s6 = float(self.joints_deg(q)["S6"])
+        lo, hi = JOINT_LIMIT_USER_DEG["S6"]
+        return bool(s6 <= lo + S6_LIMIT_MARGIN_DEG or s6 >= hi - S6_LIMIT_MARGIN_DEG)
+
     def clamp_q(self, q: np.ndarray) -> np.ndarray:
         """Clip gripper CAD span and any JOINT_LIMIT_USER_DEG joints."""
         q = np.asarray(q, dtype=float).copy()
@@ -461,12 +478,11 @@ class RobotKinematics:
         ori_weight: float = TILT_WEIGHT,
     ) -> np.ndarray:
         """One control-frame of DLS IK. Returns a new full `q` (gripper unchanged)."""
-        q_out = np.asarray(q, dtype=float).copy()
+        q_out = self.clamp_q(np.asarray(q, dtype=float).copy())
         q_arm = q_out[self._arm_q_cols].copy()
         q_start = q_arm.copy()
         target_xyz = np.asarray(target_xyz, dtype=float).reshape(3)
         cmd = None if cmd_mask is None else np.asarray(cmd_mask, dtype=bool).reshape(3)
-        n_arm = len(ARM_JOINT_NAMES)
         use_ori = R_ref is not None and ori_weight >= TILT_WEIGHT_EPS
         for _ in range(IK_ITERS):
             pos, rot, jv, jw = self.tcp_jacobian(self._q_with_arm(q_out, q_arm))
@@ -483,8 +499,14 @@ class RobotKinematics:
                 if nerr < XYZ_TOL_M and float(np.linalg.norm(err_r)) < 0.002:
                     break
                 tw = float(ori_weight)
-                j_extra = jw * TILT_MM_PER_RAD * tw
-                e_extra = err_r * TILT_MM_PER_RAD * tw
+                # S6 stop: don't spend S1–S5 on unreachable wrist roll (pulls TCP off the point).
+                if self.s6_at_limit(self._q_with_arm(q_out, q_arm)):
+                    tw *= 0.08
+                if tw >= TILT_WEIGHT_EPS:
+                    j_extra = jw * TILT_MM_PER_RAD * tw
+                    e_extra = err_r * TILT_MM_PER_RAD * tw
+                elif nerr < XYZ_TOL_M:
+                    break
             elif nerr < XYZ_TOL_M:
                 break
             if cmd is None:
@@ -510,9 +532,10 @@ class RobotKinematics:
                         max_dq=MAX_DQ_ITER_RAD,
                     )
             q_arm = q_arm + dq
+            q_out = self.clamp_q(self._q_with_arm(q_out, q_arm))
+            q_arm = q_out[self._arm_q_cols].copy()
             if float(np.max(np.abs(q_arm - q_start))) >= MAX_DQ_FRAME_RAD:
                 break
-        q_out[self._arm_q_cols] = q_arm
         return q_out
 
     def _q_with_arm(self, q_full: np.ndarray, q_arm: np.ndarray) -> np.ndarray:

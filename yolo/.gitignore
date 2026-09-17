@@ -3,8 +3,8 @@ runs/
 weights/*.pt
 datasets/raw/images/*
 datasets/raw/labels/*
-datasets/custom/images/
-datasets/custom/labels/
+datasets/splits/
+datasets/seg/
+datasets/custom/
 !datasets/raw/images/.gitkeep
 !datasets/raw/labels/.gitkeep
-!datasets/custom/.gitkeep

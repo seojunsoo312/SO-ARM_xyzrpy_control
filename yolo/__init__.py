@@ -1,1 +1,1 @@
-"""Custom 1-class YOLO pipeline (capture → label → train → detect → roi_cloud)."""
+"""1-class YOLO (`train/`) and instance pose (`pose/`)."""

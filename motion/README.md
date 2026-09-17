@@ -14,6 +14,7 @@ pendant/  →  조그 GUI. 여기서 motion 을 호출
 | `robot_kinematics.py` | URDF FK/IK |
 | `hw_controller.py` | Feetech / LeRobot 버스 |
 | `controller.py` | 조그·go-to 루프 |
+| `pick_place.py` | 책상 픽앤플레이스 시퀀스 (드롭 XY는 관절 보간, TCP 직선 아님) |
 | `pose_server.py` | 손-눈용 TCP JSON (`GET /pose`) |
 
 URDF·메시·캘리브 JSON 은 경로만 `pendant/` 에 남겨 두었다.

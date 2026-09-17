@@ -13,8 +13,8 @@
 
 - \(xyzrpy\) 의 reference 는 CAD 축이다.
 - FPFH 는 장면 전체가 아니라 **선택한 인스턴스 점군** 에만.
-- 이미 있는 `grasp_pose.py` (인스턴스·최상단·로컬 면) 는 유지. 로컬 면은 디버그/폴백.
-- 다음에 만들 것: `yolo/register.py`, `yolo/cad/` 모델, `roi_cloud` 등록 오버레이.
+- 이미 있는 `instances.py` (인스턴스·최상단) 는 유지. 로컬 면은 `pose/debug/local_plane.py` (디버그/폴백).
+- 다음에 만들 것: `yolo/pose/register.py`, `yolo/cad/` 모델, `roi_cloud` 등록 오버레이.
 
 ---
 
@@ -24,10 +24,9 @@
 
 - `K`, `T_base_cam` (`vision/calib_data/`)
 - YOLO detect / seg
-- 인스턴스 점군, 최상단, 로컬 면 오버레이 (`grasp_pose.py` + `roi_cloud.py`)
+- 인스턴스 점군, 최상단, 로컬 면 오버레이 (`instances.py` + `debug/local_plane.py` + `roi_cloud.py`)
 - 책상 RANSAC (바닥 제거)
-- `2D_pose.ipynb`
-- 펜던트 / `motion/`
+- 펜던트 / `motion/` (`pendant/teach_grasp.py`)
 
 ### 없는 것
 
@@ -47,7 +46,7 @@
 1. **쌓임 가정.** 책상은 바닥 제거만.
 2. 검증 장면: 1개 → 2–3개 → 여러 개(안 겹침) → 겹침 → 쌓임.
 3. 더미에서 깨지면 포즈보다 **마스크·점 섞임** 먼저.
-4. 로봇 명령의 정본은 **등록 \(T\)**. 로컬 면·2D 는 디버그.
+4. 로봇 명령의 정본은 **등록 \(T\)**. 로컬 면은 디버그.
 5. 카메라와 시리얼은 집기 스크립트 외에는 한 프로세스만.
 
 ---
@@ -74,7 +73,7 @@
 
 ### B. 인스턴스 점군 + 선택 (됨)
 
-`python yolo/roi_cloud.py --mask`
+`python yolo/pose/roi_cloud.py --mask`
 
 통과: 1개·2–3개에서 개수와 최상단이 맞음. concatenate OBB 없음.
 
@@ -89,7 +88,7 @@
 
 ### C. FPFH + RANSAC → ICP
 
-**파일:** `yolo/register.py`. `roi_cloud.py` 가 선택 점군을 넘김.
+**파일:** `yolo/pose/register.py`. `roi_cloud.py` 가 선택 점군을 넘김.
 
 1. 양쪽 voxel, 법선, FPFH.
 2. RANSAC global registration → \(T_\text{init}\).
@@ -105,7 +104,7 @@
 
 ### D. 디버그 비교
 
-로컬 면·`2D_pose.ipynb` 와 \(T\) 의 Δ. 로봇에는 등록만.
+로컬 면과 \(T\) 의 Δ. 로봇에는 등록만. 2D 노트북은 삭제.
 
 ### E. 단층 집기
 
@@ -121,10 +120,11 @@
 
 | 파일 | B | C0 | C | D | E |
 |------|---|----|---|---|---|
-| `yolo/grasp_pose.py` | 됨 | | | 디버그 | |
-| `yolo/register.py` | | 추가 | 추가 | | |
+| `yolo/pose/instances.py` | 됨 | | | | |
+| `yolo/pose/debug/local_plane.py` | | | | 디버그 | |
+| `yolo/pose/register.py` | | 추가 | 추가 | | |
 | `yolo/cad/` | | 추가 | | | |
-| `yolo/roi_cloud.py` | 됨 | | 수정 | | |
+| `yolo/pose/roi_cloud.py` | 됨 | | 수정 | | |
 | `yolo/pick.py` | | | | | 추가 |
 | `yolo/README.md` | | 갱신 | 갱신 | | 갱신 |
 

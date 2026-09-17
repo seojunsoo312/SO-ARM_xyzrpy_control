@@ -7,13 +7,13 @@ class: bracket
 # Rx180: 파일 +Z(브라켓 아래) → 프로젝트 +Z(위).
 mesh_rpy: [180, 0, 0]
 
-# 시뮬 배치 (프로젝트 베이스 mm/deg = URDF Rz180°). pick 변환에는 안 씀.
+# 시뮬 배치 (프로젝트 베이스 mm/deg, +X 전진). pick 변환에는 안 씀.
 place:
-  xyz_mm: [-150, 150, 2]
-  rpy_deg: [0, 0, 0]
+  xyz_mm: [150, 150, 2]
+  rpy_deg: [0, 0, -90]
 
 # 집기 (CAD 축 mm/deg). T_base_grasp = T_base_cad @ T_cad_grasp
-# 숫자는 python yolo/teach_grasp.py 에서 보면서 고친다.
+# 숫자는 python pendant/teach_grasp.py 에서 보면서 고친다.
 grasp:
   xyz_mm: [0, 0, 0]
   rpy_deg: [0, 0, 0]
@@ -22,3 +22,7 @@ grasp:
 # 브라켓 접근: pre = L+d, grasp = L+d−a (축 따라 원점 쪽으로 a mm).
 approach_d_mm: 10
 approach_a_mm: 30
+
+# 픽앤플레이스 실험용 드롭 XY. 아직 확정 아님. Z·RPY는 grasp TCP.
+drop:
+  xy_mm: [150, -100]

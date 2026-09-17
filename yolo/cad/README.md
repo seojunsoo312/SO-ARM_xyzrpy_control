@@ -17,8 +17,8 @@ class: bracket
 파일에 들어 있는 축(원점·XYZ)은 등록 없이 이렇게 본다.
 
 ```bash
-python yolo/view_cad.py
-python yolo/view_cad.py bracket_4035.stl
+python yolo/pose/view/view_cad.py
+python yolo/pose/view/view_cad.py bracket_4035.stl
 ```
 
 빨강=X 초록=Y 파랑=Z. `roi_cloud.py --cad` 축이 이것과 같아야 한다.

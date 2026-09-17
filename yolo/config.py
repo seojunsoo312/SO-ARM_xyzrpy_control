@@ -17,13 +17,17 @@ CLASS_ID = 0
 RAW_IMAGES = ROOT / "datasets" / "raw" / "images"
 RAW_LABELS = ROOT / "datasets" / "raw" / "labels"
 RAW_LABELS_SEG = ROOT / "datasets" / "raw" / "labels_seg"
-CUSTOM_ROOT = ROOT / "datasets" / "custom"
+SPLITS_DIR = ROOT / "datasets" / "splits"
+TRAIN_TXT = SPLITS_DIR / "train.txt"
+VAL_TXT = SPLITS_DIR / "val.txt"
+SEG_VIEW = ROOT / "datasets" / "seg"
 DATA_YAML = ROOT / "data.yaml"
 WEIGHTS_DIR = ROOT / "weights"
 RUNS_DIR = ROOT / "runs"
 BEST_PT = WEIGHTS_DIR / "best.pt"
 BEST_SEG_PT = WEIGHTS_DIR / "best-seg.pt"
-SAM_MODEL = "mobile_sam.pt"  # Orin 8GB. sam_b.pt 는 무겁다.
+_SAM_LOCAL = WEIGHTS_DIR / "mobile_sam.pt"
+SAM_MODEL = str(_SAM_LOCAL) if _SAM_LOCAL.is_file() else "mobile_sam.pt"  # Orin 8GB. sam_b.pt 는 무겁다.
 
 CAD_DIR = ROOT / "cad"
 CAD_YAML = CAD_DIR / "model.yaml"
@@ -123,6 +127,13 @@ TRAIN_EPOCHS = 50
 TRAIN_WORKERS = 0  # Jetson 공유메모리. PC면 2~4
 TRAIN_SEG_BATCH = 2  # seg는 detect보다 VRAM을 더 쓴다
 DETECT_CONF = 0.5
+
+
+def default_start_pt(*, seg: bool) -> str:
+    """전이학습 시작 가중치. weights/ 에 있으면 그 경로, 없으면 파일명만 (ultralytics 가 받음)."""
+    name = "yolo11n-seg.pt" if seg else "yolo11n-obb.pt"
+    local = WEIGHTS_DIR / name
+    return str(local) if local.is_file() else name
 
 
 def quiet_gtk() -> None:

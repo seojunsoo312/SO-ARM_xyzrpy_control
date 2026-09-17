@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
+import html
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _PROJECT = Path(__file__).resolve().parent.parent
@@ -10,17 +16,21 @@ if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
 import meshcat.geometry as g
+import meshcat.visualizer as meshcat_visualizer
 import numpy as np
 from pinocchio.visualize import MeshcatVisualizer
 
 from motion.base_frame import T_urdf_from_user_matrix
 from motion.robot_kinematics import RobotKinematics
 
+# Browser tab title (meshcat hardcodes "MeshCat" in viewer/dist/index.html).
+PAGE_TITLE = "시뮬레이터"
+
 # Meshcat OrbitControls always orbit world origin. Do not translate
 # /Cameras/default — that parent offset makes pan/orbit/dolly fight the target.
 # Camera lives in an Rx(+90°) frame; default convention is (x, z, 0) like (3, 1, 0).
 # Closer copy of that so the ~0.4 m arm fills the view.
-# Project base axes (overlay) are URDF Rz(180°); see motion/base_frame.py.
+# Project base axes (overlay): +X forward; see motion/base_frame.py.
 CAM_POSITION = (0.70, 0.32, 0.0)
 OVERLAY_ROOT = "teach"
 
@@ -85,6 +95,75 @@ def _axis_label_transform(axis: int, scale: float, letter_size: float) -> np.nda
     return T
 
 
+def _meshcat_viewer_root(title: str) -> str:
+    """Copy meshcat's viewer dist and replace the HTML <title>."""
+    import meshcat
+
+    src = Path(meshcat.__file__).resolve().parent / "viewer" / "dist"
+    dst = Path(tempfile.mkdtemp(prefix="meshcat_viewer_"))
+    atexit.register(shutil.rmtree, dst, True)
+    for path in src.iterdir():
+        target = dst / path.name
+        if path.name == "index.html":
+            text = path.read_text(encoding="utf-8")
+            text = text.replace("<title>MeshCat</title>", f"<title>{html.escape(title)}</title>", 1)
+            target.write_text(text, encoding="utf-8")
+        elif path.is_file():
+            os.symlink(path, target)
+    return str(dst)
+
+
+def _start_meshcat_server(zmq_url=None, server_args=None):
+    """Same as meshcat's launcher, but serve our titled index.html."""
+    from meshcat.servers.zmqserver import match_web_url, match_zmq_url
+
+    root = _meshcat_viewer_root(PAGE_TITLE)
+    code = (
+        "import meshcat.servers.zmqserver as s;"
+        f"s.VIEWER_ROOT={root!r};"
+        "s.main()"
+    )
+    args = [sys.executable, "-u", "-c", code]
+    if zmq_url is not None:
+        args.extend(["--zmq-url", zmq_url])
+    if server_args:
+        args.extend(server_args)
+    env = dict(os.environ)
+    import meshcat
+
+    env["PYTHONPATH"] = str(Path(meshcat.__file__).resolve().parent.parent)
+    server_proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+    line = ""
+    while "zmq_url" not in line:
+        line = server_proc.stdout.readline().strip().decode("utf-8")
+        if server_proc.poll() is not None:
+            outs, errs = server_proc.communicate()
+            print(outs.decode("utf-8"))
+            print(errs.decode("utf-8"))
+            raise RuntimeError(
+                "the meshcat server process exited prematurely with exit code "
+                + str(server_proc.poll())
+            )
+    zmq_url = match_zmq_url(line)
+    web_url = match_web_url(server_proc.stdout.readline().strip().decode("utf-8"))
+
+    def cleanup(proc):
+        proc.kill()
+        proc.wait()
+
+    atexit.register(cleanup, server_proc)
+    return server_proc, zmq_url, web_url
+
+
+meshcat_visualizer.start_zmq_server_as_subprocess = _start_meshcat_server
+
+
 class Visualizer:
     def __init__(self, kinematics: RobotKinematics, *, open_browser: bool = True) -> None:
         self._kin = kinematics
@@ -102,8 +181,8 @@ class Visualizer:
         self._set_initial_camera()
         self._align_floor_axes()
         self._mark_origin()
-        # Labeled project-base triad (same Rz180° as /Axes).
-        self.set_overlay_axes("base", T_urdf_from_user_matrix(), scale=0.06, tag="B")
+        # Project-base triad (same +X-forward frame as /Axes).
+        self.set_overlay_axes("base", T_urdf_from_user_matrix(), scale=0.06)
 
     def _mark_origin(self) -> None:
         """Red sphere at shared URDF / project-base origin (0,0,0)."""
@@ -120,7 +199,7 @@ class Visualizer:
         vis["/Cameras/default/rotated/<object>"].set_property("position", list(CAM_POSITION))
 
     def _align_floor_axes(self) -> None:
-        """Meshcat `/Axes` defaults to URDF world — rotate to project base (Rz180°)."""
+        """Meshcat `/Axes` defaults to URDF world — rotate to project base (+X forward)."""
         self._viz.viewer["/Axes"].set_transform(T_urdf_from_user_matrix())
 
     def _overlay(self, name: str):
@@ -172,10 +251,10 @@ class Visualizer:
         T: np.ndarray,
         *,
         scale: float = 0.04,
-        labels: bool = True,
+        labels: bool = False,
         tag: str | None = None,
     ) -> None:
-        """RGB triad. labels → tip X/Y/Z. tag → cyan frame letter (C/G/P/B…)."""
+        """RGB triad. labels → tip X/Y/Z (off by default). tag → cyan frame letter."""
         root = self._overlay(name)
         root.set_transform(np.asarray(T, dtype=float))
         root["axes"].set_object(g.triad(float(scale)))

@@ -25,9 +25,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from vision.transforms import unproject as unproject_xyz
-
 ALIGN_D2C_SW = 2
+OB_PROP_LDP_BOOL = 2  # Viewer LDP enable. 공장 기본 켜짐.
 OB_PROP_DEPTH_SOFT_FILTER_BOOL = 24  # Viewer NoiseRemovalFilter
 OB_PROP_DEPTH_MAX_DIFF_INT = 40  # Viewer Min Diff
 OB_PROP_DEPTH_MAX_SPECKLE_SIZE_INT = 41  # Viewer Max Size
@@ -400,6 +399,7 @@ class OrbbecV1:
         noise_filter: bool | None = True,
         noise_min_diff: int | None = 51200,
         noise_max_size: int | None = 1,
+        ldp: bool = False,
     ):
         sdk = Path(sdk_dir) if sdk_dir is not None else resolve_sdk_dir()
         so = _require_sdk(sdk)
@@ -461,6 +461,7 @@ class OrbbecV1:
             self._set_d2c(self.cfg, width, height, byref(err))
             if err:
                 self._delerr(err)
+            self._apply_ldp(ldp)
             self._apply_noise_filter(noise_filter, noise_min_diff, noise_max_size)
             err = c_void_p()
             self._start(self.pipe, self.cfg, byref(err))
@@ -525,6 +526,18 @@ class OrbbecV1:
             self._delerr(err)
             return None
         return value
+
+    def _apply_ldp(self, enable: bool) -> None:
+        """Laser Distance Protection. 켜면 가까울 때 프로젝터를 끔. 기본 끔."""
+        dev = self._device_ptr()
+        if not dev:
+            print("LDP: device 없음")
+            return
+        ok = self._set_bool_prop(dev, OB_PROP_LDP_BOOL, bool(enable), "LDP")
+        if not ok:
+            return
+        cur = self._get_bool_prop(dev, OB_PROP_LDP_BOOL)
+        print(f"LDP on={cur}")
 
     def _device_ptr(self):
         err = c_void_p()
@@ -650,21 +663,3 @@ class OrbbecV1:
             e = c_void_p()
             self._del_pipe(self.pipe, byref(e))
             self.pipe = None
-
-
-def depth_at_uv(depth_mm, u, v, radius=3):
-    if depth_mm is None:
-        return float("nan")
-    h, w = depth_mm.shape[:2]
-    ui, vi = int(round(u)), int(round(v))
-    y0, y1 = max(0, vi - radius), min(h, vi + radius + 1)
-    x0, x1 = max(0, ui - radius), min(w, ui + radius + 1)
-    patch = depth_mm[y0:y1, x0:x1]
-    valid = patch[(patch > 50.0) & (patch < 5000.0)]
-    if valid.size == 0:
-        return float("nan")
-    return float(np.median(valid))
-
-
-def unproject(u, v, z_mm, K):
-    return unproject_xyz(u, v, z_mm, K)

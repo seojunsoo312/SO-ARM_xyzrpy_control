@@ -9,8 +9,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PROJECT = ROOT.parent
-if str(PROJECT) not in sys.path:
-    sys.path.insert(0, str(PROJECT))
+for path in (PROJECT, ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 import customtkinter as ctk
 import numpy as np
@@ -108,11 +109,11 @@ def main() -> None:
     root = ctk.CTk()
     PendantGui(root, ctrl, viz, meshcat_url=url)
     if args.grasp:
-        from yolo.teach_grasp import attach_teach_window
+        from teach_grasp import attach_teach_window
 
         teach = attach_teach_window(root, viz, meshcat_url=url, controller=ctrl)
         if teach is not None:
-            print("Teach    물체 집기 창 (같은 Meshcat, →P/→G 이동)")
+            print("Teach    물체 집기 창 (같은 Meshcat, 대기/집기 위치 이동)")
     root.mainloop()
 
 
