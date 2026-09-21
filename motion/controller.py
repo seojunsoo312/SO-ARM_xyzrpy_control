@@ -64,10 +64,16 @@ GOTO_SETTLE_POS_M = 0.0008  # 0.8 mm — EE go-to keeps IK until TCP is on the g
 GOTO_SETTLE_MAX_S = 2.5
 GOTO_SETTLE_IK_LOOPS = 4
 # EE go-to: if the straight TCP line would hit the column (L1 = J1–J2), lift first.
-GOTO_LIFT_MIN_Z_M = 0.12
-GOTO_LIFT_CLEAR_M = 0.04
+# Height is the lowest via that clears; only then step up toward MAX.
+GOTO_LIFT_CLEAR_M = 0.025
+GOTO_LIFT_STEP_M = 0.025
+GOTO_LIFT_MAX_Z_M = 0.16
 GOTO_LIFT_SKIP_M = 0.005
 GOTO_PATH_CHECK_N = 10
+# Joint-space EE go-to: each servo_toward is capped at 5°/frame.
+# Far pick → drop (S1 ~120°+) needs more than a fixed 24 frames.
+GOTO_JOINTS_IK_FRAMES = 200
+GOTO_JOINTS_IK_POS_M = 0.015
 
 CART_AXES = ("x", "y", "z", "wx", "wy", "wz")
 ROT_FRAME_BASE = "base"
@@ -139,13 +145,13 @@ class Controller:
             for name in URDF_JOINT_NAMES
         }
 
-    def start(self) -> None:
+    def start(self, *, pose_server: bool = True) -> None:
         if self._thread is not None:
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        if self._pose_server is None:
+        if pose_server and self._pose_server is None:
             self._pose_server = PoseServer(self.handeye_payload)
             try:
                 self._pose_server.start()
@@ -419,6 +425,7 @@ class Controller:
                 R0,
                 xyz1,
                 R1,
+                q=q,
                 lift=lift,
                 lin_mps=lin_mps,
                 rot_deg_s=rot_deg_s,
@@ -491,13 +498,16 @@ class Controller:
             if self._frozen_unlocked():
                 return 0.0
             q = self._q.copy()
-        for _ in range(24):
+        err = float("inf")
+        for _ in range(GOTO_JOINTS_IK_FRAMES):
             q = self._kin.clamp_q(
                 self._kin.servo_toward(q, xyz1, R_ref=R1, ori_weight=1.0)
             )
-        pose = self._kin.forward_tcp(q)
-        err = float(np.linalg.norm(pose.xyz_m - xyz1))
-        if err > 0.015:
+            pose = self._kin.forward_tcp(q)
+            err = float(np.linalg.norm(pose.xyz_m - xyz1))
+            if err <= GOTO_JOINTS_IK_POS_M:
+                break
+        if err > GOTO_JOINTS_IK_POS_M:
             with self._lock:
                 self._interrupt_id += 1
                 self._clear_motion_unlocked()
@@ -536,6 +546,17 @@ class Controller:
         xyz1: np.ndarray,
         R1: np.ndarray,
     ) -> bool:
+        hit, _ = self._ee_follow_unlocked(q, xyz0, R0, xyz1, R1)
+        return hit
+
+    def _ee_follow_unlocked(
+        self,
+        q: np.ndarray,
+        xyz0: np.ndarray,
+        R0: np.ndarray,
+        xyz1: np.ndarray,
+        R1: np.ndarray,
+    ) -> tuple[bool, np.ndarray]:
         qk = np.asarray(q, dtype=float).copy()
         n = GOTO_PATH_CHECK_N
         for i in range(1, n + 1):
@@ -546,8 +567,34 @@ class Controller:
                 self._kin.servo_toward(qk, xyz, R_ref=R, ori_weight=1.0)
             )
             if self._kin.in_collision(qk):
-                return True
-        return False
+                return True, qk
+        return False, qk
+
+    def _ee_via_z_unlocked(
+        self,
+        q: np.ndarray,
+        xyz0: np.ndarray,
+        R0: np.ndarray,
+        xyz1: np.ndarray,
+        R1: np.ndarray,
+    ) -> float:
+        z0 = float(xyz0[2])
+        z1 = float(xyz1[2])
+        z = max(z0, z1) + GOTO_LIFT_CLEAR_M
+        z_cap = max(z, GOTO_LIFT_MAX_Z_M)
+        while z <= z_cap + 1e-9:
+            via0 = np.array([float(xyz0[0]), float(xyz0[1]), z], dtype=float)
+            via1 = np.array([float(xyz1[0]), float(xyz1[1]), z], dtype=float)
+            qk = np.asarray(q, dtype=float)
+            hit, qk = self._ee_follow_unlocked(qk, xyz0, R0, via0, R0)
+            if not hit:
+                hit, qk = self._ee_follow_unlocked(qk, via0, R0, via1, R1)
+            if not hit:
+                hit, qk = self._ee_follow_unlocked(qk, via1, R1, xyz1, R1)
+            if not hit:
+                return z
+            z += GOTO_LIFT_STEP_M
+        return z_cap
 
     def _ee_legs_unlocked(
         self,
@@ -556,6 +603,7 @@ class Controller:
         xyz1: np.ndarray,
         R1: np.ndarray,
         *,
+        q: np.ndarray,
         lift: bool,
         lin_mps: float | None,
         rot_deg_s: float | None,
@@ -566,9 +614,7 @@ class Controller:
                     xyz0, R0, xyz1, R1, lin_mps=lin_mps, rot_deg_s=rot_deg_s
                 )
             ]
-        z0 = float(xyz0[2])
-        z1 = float(xyz1[2])
-        z_via = max(z0, z1, GOTO_LIFT_MIN_Z_M) + GOTO_LIFT_CLEAR_M
+        z_via = self._ee_via_z_unlocked(q, xyz0, R0, xyz1, R1)
         via0 = np.array([float(xyz0[0]), float(xyz0[1]), z_via], dtype=float)
         via1 = np.array([float(xyz1[0]), float(xyz1[1]), z_via], dtype=float)
         pts = [
@@ -859,6 +905,7 @@ class Controller:
                         pose.rotation,
                         np.asarray(final_xyz, dtype=float),
                         np.asarray(final_R, dtype=float),
+                        q=self._q,
                         lift=True,
                         lin_mps=None,
                         rot_deg_s=None,

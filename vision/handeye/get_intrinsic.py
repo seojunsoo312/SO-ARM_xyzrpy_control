@@ -4,8 +4,8 @@
 Viewer는 필요 없다. SDK 라이브러리와 카메라만 있으면 된다. Viewer가 켜져 있으면 실패한다.
 
   프로젝트 루트에서
-  python vision/check/get_intrinsic.py
-  ORBBEC_SDK_DIR=/path/to/OrbbecSDK python vision/check/get_intrinsic.py
+  python vision/handeye/get_intrinsic.py
+  ORBBEC_SDK_DIR=/path/to/OrbbecSDK python vision/handeye/get_intrinsic.py
 """
 
 from __future__ import annotations

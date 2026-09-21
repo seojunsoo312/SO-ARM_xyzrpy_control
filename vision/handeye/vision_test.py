@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Orbbec RGB 미리보기. 프로젝트 루트에서:
 
-  python vision/check/vision_test.py
+  python vision/handeye/vision_test.py
 """
 
 from __future__ import annotations

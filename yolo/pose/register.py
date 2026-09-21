@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from vision.transforms import apply_T, rt_to_T
+from vision.transforms import apply_T, axis_angle_R, rotation_aligning, rt_to_T
 from yolo.config import cad_mesh_path, cad_mesh_rpy_deg, cad_mesh_xyz_mm, cad_unit
 from yolo.pose.depth_cloud import write_ply
 
@@ -376,6 +376,101 @@ def _yaw_rots() -> list[np.ndarray]:
     return [_R_axis(2, deg) for deg in (0.0, 90.0, 180.0, 270.0)]
 
 
+def _unit3(v: np.ndarray) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float64).reshape(3)
+    n = float(np.linalg.norm(v))
+    if n < 1e-12:
+        return v
+    return v / n
+
+
+def snap_cad_to_gravity(
+    T: np.ndarray,
+    up: np.ndarray,
+    *,
+    pivot: np.ndarray | None = None,
+) -> np.ndarray:
+    """CAD 축 하나를 책상 법선에 붙인다. 눕힘/세움 rpy를 고르는 게 아니다."""
+    T = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
+    up = _unit3(up)
+    R = T[:3, :3]
+    dots = R.T @ up
+    i = int(np.argmax(np.abs(dots)))
+    a = R[:, i]
+    s = 1.0 if abs(float(dots[i])) < 1e-12 else float(np.sign(dots[i]))
+    R2 = rotation_aligning(a, s * up) @ R
+    if pivot is not None:
+        p = np.asarray(pivot, dtype=np.float64).reshape(3)
+        world = R @ p + T[:3, 3]
+        T[:3, 3] = world - R2 @ p
+    T[:3, :3] = R2
+    return T
+
+
+def yaw_about_up(
+    T: np.ndarray,
+    up: np.ndarray,
+    deg: float,
+    *,
+    pivot: np.ndarray | None = None,
+) -> np.ndarray:
+    T = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
+    R2 = axis_angle_R(up, np.deg2rad(float(deg))) @ T[:3, :3]
+    if pivot is not None:
+        p = np.asarray(pivot, dtype=np.float64).reshape(3)
+        world = T[:3, :3] @ p + T[:3, 3]
+        T[:3, 3] = world - R2 @ p
+    T[:3, :3] = R2
+    return T
+
+
+def _orient_desk_plane(plane: np.ndarray, up: np.ndarray) -> np.ndarray:
+    p = np.asarray(plane, dtype=np.float64).reshape(4).copy()
+    n = p[:3]
+    length = float(np.linalg.norm(n))
+    if length < 1e-12:
+        return p
+    if float((n / length) @ _unit3(up)) < 0.0:
+        p = -p
+        length = float(np.linalg.norm(p[:3]))
+    p[:3] = p[:3] / max(length, 1e-12)
+    return p
+
+
+def seat_cad_on_plane(
+    T: np.ndarray,
+    cad_xyz: np.ndarray,
+    plane: np.ndarray,
+    up: np.ndarray,
+    *,
+    gap_mm: float = 0.5,
+) -> np.ndarray:
+    """CAD 최저점을 책상 위에 둔다. 카메라가 바닥면을 못 봐도 된다."""
+    T = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
+    plane = _orient_desk_plane(plane, up)
+    n = plane[:3]
+    aligned = np.asarray(apply_T(cad_xyz, T), dtype=np.float64)
+    height = aligned @ n + float(plane[3])
+    T[:3, 3] = T[:3, 3] - n * (float(np.min(height)) - float(gap_mm))
+    return T
+
+
+def rest_on_desk(
+    T: np.ndarray,
+    *,
+    cad_xyz: np.ndarray | None = None,
+    up: np.ndarray | None = None,
+    desk_plane: np.ndarray | None = None,
+) -> np.ndarray:
+    if up is None:
+        return np.asarray(T, dtype=np.float64).reshape(4, 4)
+    pivot = None if cad_xyz is None else np.mean(_as_xyz(cad_xyz), axis=0)
+    T = snap_cad_to_gravity(T, up, pivot=pivot)
+    if desk_plane is not None and cad_xyz is not None:
+        T = seat_cad_on_plane(T, cad_xyz, desk_plane, up)
+    return T
+
+
 def _shift_centroids(T: np.ndarray, cad: np.ndarray, scene: np.ndarray) -> np.ndarray:
     """CAD 무게중심을 회색 중심에 맞춘다. 코너만 붙은 해를 끌어온다."""
     T2 = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
@@ -401,6 +496,7 @@ def _pick_by_coverage(
     camera_origin: np.ndarray,
     cover_mm: float,
     up: np.ndarray | None,
+    desk_plane: np.ndarray | None = None,
     detail: bool = False,
     quick_icp: bool = False,
 ) -> tuple[np.ndarray, dict]:
@@ -414,7 +510,7 @@ def _pick_by_coverage(
         )
         T = np.linalg.inv(T_sc)
         if up is not None:
-            T = maybe_flip_into_table(T, up_base=up)
+            T = rest_on_desk(T, cad_xyz=cad, up=up, desk_plane=desk_plane)
         cov = pose_coverage(
             cad, scene, T, thresh_mm=cover_mm, camera_origin=camera_origin, detail=detail
         )
@@ -529,16 +625,19 @@ def _snap_cad_90(
     camera_origin: np.ndarray,
     cover_mm: float,
     up: np.ndarray | None,
+    desk_plane: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict]:
-    """CAD +Z 를 위로 맞춘 뒤, ㄴ yaw 만 0/90/180/270 으로 고른다."""
+    """책상 법선에 CAD 축을 붙인 뒤, 그 축 둘레 yaw 만 0/90/180/270 으로 고른다."""
     T0 = np.asarray(T_cad_scene, dtype=np.float64).reshape(4, 4)
     if up is not None:
-        T0 = maybe_flip_into_table(T0, up_base=up)
-    poses = []
-    for Rloc in _yaw_rots():
-        T = T0.copy()
-        T[:3, :3] = T0[:3, :3] @ Rloc
-        poses.append(T)
+        T0 = rest_on_desk(T0, cad_xyz=cad, up=up, desk_plane=desk_plane)
+        axis = _unit3(up)
+    else:
+        axis = _unit3(T0[:3, 2])
+    pivot = np.mean(cad, axis=0)
+    poses = [
+        yaw_about_up(T0, axis, deg, pivot=pivot) for deg in (0.0, 90.0, 180.0, 270.0)
+    ]
     return _pick_by_coverage(
         cad,
         scene,
@@ -548,6 +647,7 @@ def _snap_cad_90(
         camera_origin=camera_origin,
         cover_mm=cover_mm,
         up=up,
+        desk_plane=desk_plane,
         detail=False,
         quick_icp=True,
     )
@@ -585,6 +685,7 @@ def register_fpfh_icp(
     tries: int = 4,
     camera_origin: np.ndarray | None = None,
     up: np.ndarray | None = None,
+    desk_plane: np.ndarray | None = None,
 ) -> dict:
     """부분 장면→전체 CAD로 등록한 뒤 CAD→장면 T를 반환한다."""
     o3d = _require_o3d()
@@ -657,12 +758,17 @@ def register_fpfh_icp(
         camera_origin=cam,
         cover_mm=cover_mm,
         up=up,
+        desk_plane=desk_plane,
     )
     T_snap = np.linalg.inv(
         _partial_icp_to_cad(source, target, np.linalg.inv(T_snap), quick=False)
     )
     if up is not None:
-        T_snap = maybe_flip_into_table(T_snap, up_base=up)
+        T_snap = rest_on_desk(T_snap, cad_xyz=cad, up=up, desk_plane=desk_plane)
+        T_snap = np.linalg.inv(
+            _partial_icp_to_cad(source, target, np.linalg.inv(T_snap), quick=True)
+        )
+        T_snap = rest_on_desk(T_snap, cad_xyz=cad, up=up, desk_plane=desk_plane)
     cov = pose_coverage(
         cad, scene, T_snap, thresh_mm=cover_mm, camera_origin=cam, detail=True
     )
@@ -680,6 +786,7 @@ def register_fpfh_icp(
             camera_origin=cam,
             cover_mm=cover_mm,
             up=up,
+            desk_plane=desk_plane,
             detail=False,
             quick_icp=False,
         )
@@ -732,7 +839,7 @@ def T_to_xyzrpy(T: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def maybe_flip_into_table(T: np.ndarray, *, up_base: np.ndarray | None = None) -> np.ndarray:
-    """그리퍼 접근이 책상 아래(-Z)로 꽂히면 CAD Z 를 180° 뒤집는다."""
+    """CAD +Z 가 위 축일 때만, 책상 아래로 꽂히면 180° 뒤집는다. 세운 자세는 건드리지 않는다."""
     T = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
     up = np.array([0.0, 0.0, 1.0], dtype=np.float64) if up_base is None else np.asarray(
         up_base, dtype=np.float64
@@ -741,7 +848,10 @@ def maybe_flip_into_table(T: np.ndarray, *, up_base: np.ndarray | None = None) -
     if n < 1e-12:
         return T
     up = up / n
-    if float(T[:3, 2] @ up) >= 0.0:
+    dots = T[:3, :3].T @ up
+    if int(np.argmax(np.abs(dots))) != 2:
+        return T
+    if float(dots[2]) >= 0.0:
         return T
     rx = np.array(
         [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
@@ -757,6 +867,8 @@ def refine_icp(
     *,
     voxel_mm: float = 2.0,
     camera_origin: np.ndarray | None = None,
+    up: np.ndarray | None = None,
+    desk_plane: np.ndarray | None = None,
 ) -> dict:
     """이전 CAD→장면 T에서 부분 장면→CAD ICP로 추적한다."""
     cad = _as_xyz(cad_xyz)
@@ -773,6 +885,8 @@ def refine_icp(
         np.linalg.inv(T0),
     )
     best_T = np.linalg.inv(T_scene_cad)
+    if up is not None:
+        best_T = rest_on_desk(best_T, cad_xyz=cad, up=up, desk_plane=desk_plane)
     cov = pose_coverage(cad, scene, best_T, thresh_mm=3.0, camera_origin=cam)
     return {
         "T": best_T,
@@ -841,6 +955,7 @@ def register_pose(
     T_init: np.ndarray | None = None,
     T_prev: np.ndarray | None = None,
     camera_origin: np.ndarray | None = None,
+    desk_plane: np.ndarray | None = None,
 ) -> dict:
     """한 인스턴스 점군 → T, xyzrpy.
 
@@ -851,7 +966,13 @@ def register_pose(
     up = np.array([0.0, 0.0, 1.0]) if flip and T_base_cam is None else None
     if T_init is not None:
         raw = refine_icp(
-            cad_xyz, scene_xyz, T_init, voxel_mm=voxel_mm, camera_origin=cam
+            cad_xyz,
+            scene_xyz,
+            T_init,
+            voxel_mm=voxel_mm,
+            camera_origin=cam,
+            up=up,
+            desk_plane=desk_plane,
         )
     else:
         raw = register_fpfh_icp(
@@ -861,15 +982,35 @@ def register_pose(
             tries=tries,
             camera_origin=cam,
             up=up,
+            desk_plane=desk_plane,
         )
     T = raw["T"]
     if T_base_cam is not None:
         T = np.asarray(T_base_cam, dtype=np.float64).reshape(4, 4) @ T
         if flip:
-            T = maybe_flip_into_table(T, up_base=np.array([0.0, 0.0, 1.0]))
-    elif flip:
-        T = maybe_flip_into_table(T, up_base=np.array([0.0, 0.0, 1.0]))
+            z_up = np.array([0.0, 0.0, 1.0])
+            z_plane = np.array([0.0, 0.0, 1.0, 0.0])
+            T = rest_on_desk(T, cad_xyz=cad_xyz, up=z_up, desk_plane=z_plane)
+            T = maybe_flip_into_table(T, up_base=z_up)
+            T = rest_on_desk(T, cad_xyz=cad_xyz, up=z_up, desk_plane=z_plane)
+    elif up is not None:
+        T = rest_on_desk(T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane)
+        T = maybe_flip_into_table(T, up_base=up)
+        T = rest_on_desk(T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane)
     T = stabilize_T(T, T_prev, pivot=np.median(cad_xyz, axis=0))
+    if T_base_cam is None:
+        cov = pose_coverage(
+            cad_xyz, scene_xyz, T, thresh_mm=3.0, camera_origin=cam
+        )
+        raw["fitness"] = cov["frac"]
+        raw["inlier_rmse"] = cov["median"]
+        raw["scene_frac"] = cov["frac"]
+        raw["scene_med"] = cov["median"]
+        raw["scene_p90"] = cov["p90"]
+        raw["vis_frac"] = cov["vis_frac"]
+        raw["xy_iou"] = cov["xy_iou"]
+        raw["center_delta"] = cov["center_delta"]
+        raw["aligned_ok"] = cov["aligned_ok"]
     xyz, rpy = T_to_xyzrpy(T)
     return {
         "T": T,

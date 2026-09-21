@@ -34,6 +34,7 @@ class InstanceCloud:
     rgb: np.ndarray
     height_score: float
     n_zok: int = 0
+    quad: np.ndarray | None = None  # (4, 2) YOLO OBB, else AABB 꼭짓점
 
 
 def height_above_plane(xyz: np.ndarray, plane: np.ndarray) -> np.ndarray:
@@ -92,6 +93,10 @@ def collect_instances(
             roi = mask_from_quad(h, w, quad, pad=pad)
         else:
             xyxy = det.xyxy[0].tolist()
+            xa, ya, xb, yb = (float(v) for v in xyxy)
+            quad = np.array(
+                [[xa, ya], [xb, ya], [xb, yb], [xa, yb]], dtype=np.float32
+            )
             roi = mask_from_xyxy(h, w, xyxy, pad=pad)
         if use_mask and result.masks is not None:
             if result.masks.xy is not None and i < len(result.masks.xy):
@@ -120,6 +125,7 @@ def collect_instances(
                 rgb=rgb,
                 height_score=score,
                 n_zok=n_zok,
+                quad=quad,
             )
         )
     return out

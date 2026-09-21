@@ -39,6 +39,11 @@ DEFAULT_DROP_XY_MM = (150.0, -100.0)
 DEFAULT_APPROACH_D_MM = 10.0
 DEFAULT_APPROACH_A_MM = 30.0  # pre → grasp along axis (mm toward CAD origin)
 APPROACH_MARKER_RADIUS_M = 0.004  # 4 mm
+# TCP vs orange pre sphere: turn green when close (debug go-to).
+PRE_TCP_MATCH_POS_MM = 1.5
+APPROACH_PRE_COLOR = 0xFB923C
+APPROACH_PRE_MATCH_COLOR = 0x22C55E
+APPROACH_OTHER_COLOR = 0xC2410C
 # Teach 대기/집기 위치 go-to (not jog). 30 mm/s, 45 deg/s.
 GOTO_LIN_MPS = 0.030
 GOTO_LIN_MIN_MPS = 0.010
@@ -46,11 +51,14 @@ GOTO_LIN_MAX_MPS = 0.080
 GOTO_ROT_DEG_S = 45.0
 GOTO_ROT_MIN_DEG_S = 10.0
 GOTO_ROT_MAX_DEG_S = 90.0
-# Random place (project base mm): polar sector ∩ box ∩ height, mesh above floor.
+# Random place (project base mm): polar sector ∩ box ∩ r ring ∩ height, mesh above floor.
 # x=r·cosθ, y=r·sinθ; θ ∈ (−90°, 90°) → x > 0 (전진) half-plane.
+# r_min: INIT 팔과 AABB 겹침 회피. r_max: 먼 코너 IK (r≳271 mm) 회피. 박스는 유지.
 RANDOM_XY_ABS_MAX_MM = 200.0
-RANDOM_R_MIN_MM = 100.0  # r > 100 mm (10 cm)
-RANDOM_R2_MIN_MM2 = RANDOM_R_MIN_MM * RANDOM_R_MIN_MM  # r² > 10000
+RANDOM_R_MIN_MM = 120.0  # r > 120 mm
+RANDOM_R_MAX_MM = 270.0  # r < 270 mm (cuts |x|≈|y|≈200 corners, keeps (200, 0))
+RANDOM_R2_MIN_MM2 = RANDOM_R_MIN_MM * RANDOM_R_MIN_MM
+RANDOM_R2_MAX_MM2 = RANDOM_R_MAX_MM * RANDOM_R_MAX_MM
 RANDOM_THETA_MIN_DEG = -90.0
 RANDOM_THETA_MAX_DEG = 90.0
 RANDOM_Z_MIN_MM = 0.0
@@ -585,7 +593,12 @@ def compute_auto_pre(
         if s6_alt is not None and s6_face is None:
             pick_alt = True
         elif s6_alt is not None and s6_face is not None:
-            pick_alt = abs(s6_alt - s6_now) + 1e-9 < abs(s6_face - s6_now)
+            # pitch− is ~180° from INIT and breaks P→G. Prefer pitch+ across face/alt
+            # before min |ΔS6| (which used to pick a flipped pre).
+            if bool(flip_alt) != bool(flip):
+                pick_alt = not bool(flip_alt)
+            else:
+                pick_alt = abs(s6_alt - s6_now) + 1e-9 < abs(s6_face - s6_now)
         if pick_alt:
             other_pre_base = (float(p_base[0]), float(p_base[1]), float(p_base[2]))
             p_base = p_base_alt
@@ -672,10 +685,10 @@ def _theta_in_sector(theta_deg: float) -> bool:
 
 
 def _r_max_for_theta_mm(theta_rad: float) -> float:
-    """Largest r with |r cosθ|<200 and |r sinθ|<200."""
+    """Largest r with |r cosθ|<200, |r sinθ|<200, and r < RANDOM_R_MAX_MM."""
     c = abs(float(np.cos(theta_rad)))
     s = abs(float(np.sin(theta_rad)))
-    lim = np.inf
+    lim = float(RANDOM_R_MAX_MM) - 1e-3
     if c > 1e-12:
         lim = min(lim, (RANDOM_XY_ABS_MAX_MM - 1e-3) / c)
     if s > 1e-12:
@@ -686,9 +699,49 @@ def _r_max_for_theta_mm(theta_rad: float) -> float:
 def _place_xy_in_region(x: float, y: float) -> bool:
     if abs(x) >= RANDOM_XY_ABS_MAX_MM or abs(y) >= RANDOM_XY_ABS_MAX_MM:
         return False
-    if x * x + y * y <= RANDOM_R2_MIN_MM2:
+    r2 = x * x + y * y
+    if r2 <= RANDOM_R2_MIN_MM2 or r2 >= RANDOM_R2_MAX_MM2:
         return False
     return _theta_in_sector(_theta_deg_xy(x, y))
+
+
+def _place_region_overlay_m(n_arc: int = 64) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Random-place XY region as a thin sheet in URDF meters.
+
+    Returns (verts, faces, outline_xyz). Outline is (N, 3) along the outer then
+    reversed inner boundary.
+    """
+    from motion.base_frame import R_URDF_FROM_USER
+
+    n = max(8, int(n_arc))
+    thetas = np.linspace(
+        np.deg2rad(RANDOM_THETA_MIN_DEG + 1e-3),
+        np.deg2rad(RANDOM_THETA_MAX_DEG - 1e-3),
+        n,
+    )
+    r_min = float(RANDOM_R_MIN_MM) / 1000.0
+    z = 0.0008
+    inner = np.empty((n, 3), dtype=float)
+    outer = np.empty((n, 3), dtype=float)
+    for i, th in enumerate(thetas):
+        r_max = _r_max_for_theta_mm(float(th)) / 1000.0
+        c, s = float(np.cos(th)), float(np.sin(th))
+        inner[i] = (r_min * c, r_min * s, z)
+        outer[i] = (r_max * c, r_max * s, z)
+    verts_user = np.vstack([inner, outer])
+    faces: list[list[int]] = []
+    for i in range(n - 1):
+        a, b = i, i + 1
+        c_i, d = n + i, n + i + 1
+        faces.append([a, d, b])
+        faces.append([a, c_i, d])
+        faces.append([a, b, d])
+        faces.append([a, d, c_i])
+    outline_user = np.vstack([outer, inner[::-1]])
+    R = R_URDF_FROM_USER
+    verts = (R @ verts_user.T).T
+    outline = (R @ outline_user.T).T
+    return verts, np.asarray(faces, dtype=np.uint32), outline
 
 
 def _place_origin_in_region(xyz_mm: np.ndarray) -> bool:
@@ -709,7 +762,7 @@ def _mesh_above_floor(verts_cad_m: np.ndarray, place: PlacePose) -> bool:
 
 
 def _sample_xy_mm(rng: np.random.Generator) -> tuple[float, float] | None:
-    """One (x,y) in the S1 polar sector ∩ |x|,|y|<200, r > RANDOM_R_MIN_MM. None if impossible."""
+    """One (x,y) in S1 sector ∩ |x|,|y|<200 ∩ (RANDOM_R_MIN_MM, RANDOM_R_MAX_MM). None if impossible."""
     r_min = float(RANDOM_R_MIN_MM) + 1e-3
     theta_deg = float(rng.uniform(RANDOM_THETA_MIN_DEG + 1e-3, RANDOM_THETA_MAX_DEG - 1e-3))
     theta = np.deg2rad(theta_deg)
@@ -890,8 +943,10 @@ class TeachGraspGui:
         self._grasp_spec = grasp
         self._drop_xy = DEFAULT_DROP_XY_MM
         self._grasp_hide_var = None
+        self._region_hide_var = None
         self._cad_loaded = False
         self._auto_pre: AutoPreResult | None = None
+        self._pre_tcp_matched: bool | None = None
         self._status: ctk.CTkLabel | None = None
         self.entries: dict[str, ctk.CTkEntry] = {}
         self.sliders: dict[str, ctk.CTkSlider] = {}
@@ -976,6 +1031,15 @@ class TeachGraspGui:
             width=160,
         )
         self._grasp_hide_cb.pack(side="left")
+        self._region_hide_var = ctk.BooleanVar(value=False)
+        self._region_hide_cb = ctk.CTkCheckBox(
+            hide_row,
+            text="비활성화 (영역 숨김)",
+            variable=self._region_hide_var,
+            command=self._on_region_hide_toggle,
+            width=170,
+        )
+        self._region_hide_cb.pack(side="left", padx=(12, 0))
 
         self._section(body, "이동 속도 (대기 / 집기 / 픽앤플레이스)")
         self._lin_vel_label = ctk.CTkLabel(
@@ -1028,7 +1092,7 @@ class TeachGraspGui:
             text="픽앤플레이스",
             command=self.start_pick_place,
             height=56,
-            font=ctk.CTkFont(size=20, weight="bold"),
+            font=ctk.CTkFont(family="Noto Sans CJK KR", size=18),
         )
         self._btn_seq.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         self._btn_init = ctk.CTkButton(
@@ -1104,7 +1168,8 @@ class TeachGraspGui:
         root.bind("<Return>", lambda _e: self.apply())
         self._draw_static(vertices_m, faces)
         self.apply()
-        if self._drive_viz:
+        # Color pre sphere while TCP moves; pendant owns display(q) when not drive_viz.
+        if self._ctrl is not None:
             self._schedule_display()
 
     def _section(self, parent, title: str) -> None:
@@ -1121,9 +1186,39 @@ class TeachGraspGui:
     def _on_grasp_hide_toggle(self) -> None:
         self.apply()
 
+    def _region_hidden(self) -> bool:
+        var = getattr(self, "_region_hide_var", None)
+        return bool(var.get()) if var is not None else False
+
+    def _on_region_hide_toggle(self) -> None:
+        if self._region_hidden():
+            self._hide_region_overlays()
+        else:
+            self._show_region_overlays()
+
     def _hide_grasp_overlays(self) -> None:
         for name in ("grasp", "grasp_marker", "approach"):
             self._viz.clear_overlay(name)
+
+    def _hide_region_overlays(self) -> None:
+        for name in ("place_region", "place_region_edge"):
+            self._viz.clear_overlay(name)
+
+    def _show_region_overlays(self) -> None:
+        region_v, region_f, region_loop = _place_region_overlay_m()
+        self._viz.set_overlay_mesh(
+            "place_region",
+            region_v,
+            region_f,
+            color=0x86EFAC,
+            opacity=0.28,
+        )
+        self._viz.set_overlay_lines(
+            "place_region_edge",
+            region_loop,
+            color=0x4ADE80,
+            closed=True,
+        )
 
     def _sync_goto_speed(self) -> None:
         if self._pp_runner is not None:
@@ -1413,6 +1508,8 @@ class TeachGraspGui:
             color=0x2F2F35,
             opacity=0.45,
         )
+        if not self._region_hidden():
+            self._show_region_overlays()
         self._viz.set_overlay_mesh("cad", vertices_m, faces, color=0xC4C4C8, opacity=0.92)
         self._cad_loaded = True
 
@@ -1430,8 +1527,49 @@ class TeachGraspGui:
         if self._ctrl is None:
             return
         st = self._ctrl.snapshot()
-        self._viz.display(st.q)
+        if self._drive_viz:
+            self._viz.display(st.q)
+        self._update_pre_match_color(st)
         self.root.after(DISPLAY_MS, self._schedule_display)
+
+    def _tcp_matches_pre(self, st) -> bool:
+        """True if TCP is on the orange pre sphere (project-base position)."""
+        auto = self._auto_pre
+        if auto is None:
+            return False
+        err_p = float(
+            np.linalg.norm(np.asarray(st.pose.xyz_m, dtype=float) - auto.T_base[:3, 3])
+        )
+        return err_p * 1000.0 < PRE_TCP_MATCH_POS_MM
+
+    def _draw_approach_markers(self, *, matched: bool) -> None:
+        auto = self._auto_pre
+        if auto is None:
+            return
+        T_p = _T_meshcat(auto.T_base)
+        centers = [T_p[:3, 3]]
+        colors = [APPROACH_PRE_MATCH_COLOR if matched else APPROACH_PRE_COLOR]
+        if auto.other_pre_base is not None:
+            T_other = np.eye(4)
+            T_other[:3, 3] = np.asarray(auto.other_pre_base, dtype=float)
+            centers.append(_T_meshcat(T_other)[:3, 3])
+            colors.append(APPROACH_OTHER_COLOR)
+        self._viz.clear_overlay("approach_markers")
+        self._viz.set_overlay_spheres(
+            "approach_markers",
+            np.stack(centers, axis=0),
+            radius_m=APPROACH_MARKER_RADIUS_M,
+            colors=colors,
+        )
+
+    def _update_pre_match_color(self, st) -> None:
+        if self._auto_pre is None:
+            return
+        matched = self._tcp_matches_pre(st)
+        if matched is self._pre_tcp_matched:
+            return
+        self._pre_tcp_matched = matched
+        self._draw_approach_markers(matched=matched)
 
     def _read_da(self) -> tuple[float, float]:
         try:
@@ -1495,20 +1633,11 @@ class TeachGraspGui:
             )
         else:
             self._viz.clear_overlay("n_axis")
-        self._viz.clear_overlay("approach_markers")
-        centers = [T_p[:3, 3]]
-        colors = [0xFB923C]
-        if auto.other_pre_base is not None:
-            T_other = np.eye(4)
-            T_other[:3, 3] = np.asarray(auto.other_pre_base, dtype=float)
-            centers.append(_T_meshcat(T_other)[:3, 3])
-            colors.append(0xC2410C)
-        self._viz.set_overlay_spheres(
-            "approach_markers",
-            np.stack(centers, axis=0),
-            radius_m=APPROACH_MARKER_RADIUS_M,
-            colors=colors,
-        )
+        matched = False
+        if self._ctrl is not None:
+            matched = self._tcp_matches_pre(self._ctrl.snapshot())
+        self._pre_tcp_matched = matched
+        self._draw_approach_markers(matched=matched)
         if self._grasp_section_hidden():
             self._hide_grasp_overlays()
         else:

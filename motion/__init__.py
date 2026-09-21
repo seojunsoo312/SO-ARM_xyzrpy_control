@@ -1,6 +1,7 @@
-"""Arm motion: IK, serial bus, jog/go-to loop. No GUI, no YOLO.
+"""Arm motion: IK, serial bus, jog/go-to loop. No YOLO.
 
 Assets that stay in pendant/: URDF, meshes, Feetech calibration JSON.
+교육용 Arm 은 Meshcat 뷰어를 연다.
 """
 
 from pathlib import Path
@@ -26,6 +27,7 @@ from motion.hw_controller import (
     grip_100_to_user,
     grip_user_to_100,
 )
+from motion.arm import Arm, ArmError
 from motion.pose_server import POSE_URL, PoseServer, fetch_pose
 from motion.robot_kinematics import (
     EE_FRAME,
@@ -57,6 +59,8 @@ __all__ = [
     "TCP_OFFSET_IN_L6",
     "TcpPose",
     "URDF_JOINT_NAMES",
+    "Arm",
+    "ArmError",
     "Controller",
     "fetch_pose",
     "grip_100_to_user",

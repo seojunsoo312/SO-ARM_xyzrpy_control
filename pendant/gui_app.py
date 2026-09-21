@@ -18,15 +18,12 @@ import numpy as np
 
 from motion.controller import (
     DEFAULT_SPEED_PCT,
-    GRIPPER_VEL_UNIT_S,
     JOG_ROT_DEG_S,
     JOG_ROT_MAX_DEG_S,
     JOG_ROT_MIN_DEG_S,
     JOG_VEL_MAX_MPS,
     JOG_VEL_MIN_MPS,
     JOG_VEL_MPS,
-    JOINT_VEL_DEG_S,
-    JOINT_VEL_MIN_DEG_S,
     ROT_FRAME_BASE,
     ROT_FRAME_TCP,
     SPEED_PCT_MAX,
@@ -72,17 +69,10 @@ class PendantGui:
 
         status = ctk.CTkLabel(
             root,
-            text=(
-                f"Hold +/− to jog. Joint {JOINT_VEL_MIN_DEG_S:.0f}–{JOINT_VEL_DEG_S:.0f}°/s · "
-                f"gripper {GRIPPER_VEL_UNIT_S:.0f}/s · "
-                f"XYZ {JOG_VEL_MIN_MPS * 1000:.0f}–{JOG_VEL_MAX_MPS * 1000:.0f} mm/s · "
-                f"Rx/Ry/Rz {JOG_ROT_MIN_DEG_S:.0f}–{JOG_ROT_MAX_DEG_S:.0f}°/s · "
-                f"속도% = 조그·Go-to 공통 · "
-                f"Meshcat: {meshcat_url or 'open the printed URL'}"
-            ),
+            text=f"+/− 조그 · 속도% 공통 · Meshcat: {meshcat_url or 'printed URL'}",
             anchor="w",
         )
-        status.pack(fill="x", padx=12, pady=(12, 4))
+        status.pack(side="top", fill="x", padx=12, pady=(8, 2))
 
         self.tcp_label = ctk.CTkLabel(root, text="TCP: —", font=ctk.CTkFont(family="monospace", size=14), anchor="w")
         self.rpy_label = ctk.CTkLabel(root, text="RxRyRz: —", font=ctk.CTkFont(family="monospace", size=14), anchor="w")
@@ -97,22 +87,20 @@ class PendantGui:
             anchor="w",
         )
         self.fault_label = ctk.CTkLabel(root, text="", text_color="#f87171", anchor="w")
-        self.tcp_label.pack(anchor="w", padx=12)
-        self.rpy_label.pack(anchor="w", padx=12)
-        self.err_label.pack(anchor="w", padx=12)
-        self.mode_label.pack(anchor="w", padx=12)
-        self.rot_frame_label.pack(anchor="w", padx=12)
-        self.fault_label.pack(anchor="w", padx=12, pady=(0, 4))
+        self.tcp_label.pack(side="top", anchor="w", padx=12)
+        self.rpy_label.pack(side="top", anchor="w", padx=12)
+        self.err_label.pack(side="top", anchor="w", padx=12)
+        self.mode_label.pack(side="top", anchor="w", padx=12)
+        self.rot_frame_label.pack(side="top", anchor="w", padx=12)
+        self.fault_label.pack(side="top", anchor="w", padx=12, pady=(0, 2))
 
         bar = ctk.CTkFrame(root, fg_color="transparent")
-
         body = ctk.CTkFrame(root, fg_color="transparent")
-        body.pack(fill="x", padx=12, pady=(4, 4))
         body.grid_columnconfigure(0, weight=1)
         body.grid_columnconfigure(1, weight=1)
 
-        self.root.minsize(900, 640)
-        self.root.geometry("980x720")
+        self.root.minsize(900, 700)
+        self.root.geometry("980x780")
         left = ctk.CTkFrame(body)
         right = ctk.CTkFrame(body)
         left.grid(row=0, column=0, sticky="new", padx=(0, 6))
@@ -288,7 +276,8 @@ class PendantGui:
         self._rpy_vel_slider.pack(fill="x", padx=4, pady=(4, 6))
         self._ctrl.set_rpy_jog_deg_s(JOG_ROT_DEG_S)
 
-        bar.pack(fill="x", padx=12, pady=(4, 12))
+        bar.pack(side="bottom", fill="x", padx=12, pady=(4, 10))
+        body.pack(side="top", fill="both", expand=True, padx=12, pady=(2, 4))
         ctk.CTkButton(bar, text="HOME", width=80, command=self._ctrl.home).pack(side="left", padx=(0, 8))
         ctk.CTkButton(bar, text="초기자세", width=90, command=self._goto_init_pose).pack(
             side="left", padx=(0, 8)
@@ -304,6 +293,14 @@ class PendantGui:
         ).pack(side="left", padx=(0, 8))
         self.connect_btn = ctk.CTkButton(bar, text="Connect", width=110, command=self._toggle_connect)
         self.connect_btn.pack(side="right")
+        self._trail_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            bar,
+            text="TCP 경로",
+            variable=self._trail_var,
+            command=self._on_trail_toggle,
+            width=90,
+        ).pack(side="left", padx=(8, 0))
 
         self.root.bind_all("<ButtonRelease-1>", self._on_global_release, add="+")
         self._fill_joints()
@@ -472,6 +469,9 @@ class PendantGui:
         pct = max(int(SPEED_PCT_MIN), min(int(SPEED_PCT_MAX), pct))
         self._ctrl.set_speed_pct(pct)
         self._speed_label.configure(text=self._speed_label_text(pct))
+
+    def _on_trail_toggle(self) -> None:
+        self._viz.set_tcp_trail_enabled(bool(self._trail_var.get()))
 
     def _on_rot_frame(self, value: str) -> None:
         frame = ROT_FRAME_TCP if str(value).upper() == "TCP" else ROT_FRAME_BASE

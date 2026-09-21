@@ -10,7 +10,7 @@ V4L2 컬러만으로는 안 된다. Orbbec SDK(D2C) + 학습한 best.pt / best-s
   python yolo/pose/roi_cloud.py --mask --cad --base
   python yolo/pose/roi_cloud.py --mask --no-noise-filter
   v=3D  c=지금 등록  s=PLY  r=평면  q=종료
-  슬라이더: Viewer NoiseRemovalFilter  (min_diff, max_size)
+  별도 창: NoiseRemoval / HoleFilter / HoleFilling / Color / DepthExp / Temporal
 """
 
 from __future__ import annotations
@@ -28,6 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from vision.calib import intrinsics_for_rotate180, load_K, load_T_base_cam
 from vision.camera import FRAME_HEIGHT, FRAME_WIDTH, ROTATE_180
 from vision.transforms import invert_T, plane_tilt_from_z_deg, transform_plane
+from vision.orbbec_filters import (
+    NOISE_MAX_SIZE_DEFAULT,
+    NOISE_MIN_DIFF_DEFAULT,
+    OrbbecFilterPanel,
+)
 from yolo.config import BEST_PT, BEST_SEG_PT, DETECT_CONF, RUNS_DIR, add_class_argument, class_from_args, quiet_gtk
 from yolo.pose.depth_cloud import (
     colorize_depth,
@@ -47,12 +52,18 @@ import numpy as np  # noqa: E402
 
 WIN = "YOLO box ROI cloud"
 ROI_DIR = RUNS_DIR / "roi"
-NOISE_MIN_DIFF_MAX = 51200  # Orbbec 문서 min_diff 1~51200
-NOISE_MAX_SIZE_MAX = 1000  # Orbbec 문서 max_size 1~1000
-NOISE_MIN_DIFF_DEFAULT = 51200
-NOISE_MAX_SIZE_DEFAULT = 1
-TB_MIN_DIFF = "MinDiff"
-TB_MAX_SIZE = "MaxSize"
+
+
+def _work_desk_plane(plane, T_bc) -> np.ndarray | None:
+    """등록 프레임의 책상. --base 면 로봇 XY, 없으면 카메라 RANSAC."""
+    if plane is not None:
+        p = np.asarray(plane, dtype=np.float64).reshape(4)
+        if T_bc is not None:
+            p = transform_plane(p, T_bc)
+        return p
+    if T_bc is not None:
+        return np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float64)
+    return None
 
 
 def _project_cam(xyz: np.ndarray, K: np.ndarray) -> tuple[int, int] | None:
@@ -62,6 +73,29 @@ def _project_cam(xyz: np.ndarray, K: np.ndarray) -> tuple[int, int] | None:
     u = float(K[0, 0]) * float(xyz[0]) / z + float(K[0, 2])
     v = float(K[1, 1]) * float(xyz[1]) / z + float(K[1, 2])
     return int(round(u)), int(round(v))
+
+
+def _draw_roi_outline(img: np.ndarray, roi: np.ndarray, color, thick: int = 1) -> bool:
+    """ROI 마스크 윤곽. 뎁스 톱니는 닫고 폴리곤만 남긴다. 점군은 안 바꿈."""
+    mask = np.ascontiguousarray(roi.astype(np.uint8))
+    if not np.any(mask):
+        return False
+    k = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return False
+    simplified = []
+    for cnt in contours:
+        if cv2.contourArea(cnt) < 8:
+            continue
+        eps = max(2.0, 0.02 * cv2.arcLength(cnt, True))
+        approx = cv2.approxPolyDP(cnt, eps, True)
+        simplified.append(approx if len(approx) >= 3 else cnt)
+    if not simplified:
+        return False
+    cv2.drawContours(img, simplified, -1, color, thick, cv2.LINE_AA)
+    return True
 
 
 def _draw_cad_axes(
@@ -126,6 +160,7 @@ class _CadWorker:
         self._job: np.ndarray | None = None
         self._T_init: np.ndarray | None = None
         self._T_prev: np.ndarray | None = None
+        self._desk_plane: np.ndarray | None = None
         self.result: dict | None = None
         self.error: str | None = None
         self.busy = False
@@ -140,6 +175,7 @@ class _CadWorker:
         *,
         T_init: np.ndarray | None = None,
         T_prev: np.ndarray | None = None,
+        desk_plane: np.ndarray | None = None,
     ) -> bool:
         if len(xyz) < 20:
             return False
@@ -149,6 +185,11 @@ class _CadWorker:
             self._job = np.asarray(xyz, dtype=np.float64).copy()
             self._T_init = None if T_init is None else np.asarray(T_init, dtype=np.float64).copy()
             self._T_prev = None if T_prev is None else np.asarray(T_prev, dtype=np.float64).copy()
+            self._desk_plane = (
+                None
+                if desk_plane is None
+                else np.asarray(desk_plane, dtype=np.float64).reshape(4).copy()
+            )
             self.busy = True
             self.error = None
         return True
@@ -159,6 +200,7 @@ class _CadWorker:
                 xyz = self._job
                 T_init = self._T_init
                 T_prev = self._T_prev
+                desk_plane = self._desk_plane
                 self._job = None
             if xyz is None:
                 time.sleep(0.03)
@@ -173,6 +215,7 @@ class _CadWorker:
                     T_init=T_init,
                     T_prev=T_prev,
                     camera_origin=self.camera_origin,
+                    desk_plane=desk_plane,
                 )
                 err = None
             except Exception as exc:
@@ -225,6 +268,11 @@ def main() -> None:
         help="장면(회색) 픽셀 간격. 1이면 전 픽셀",
     )
     parser.add_argument("--pad", type=int, default=2)
+    parser.add_argument(
+        "--show-obb",
+        action="store_true",
+        help="RGB·뎁스에 YOLO OBB 네 변을 그림 (자홍). 노란 선은 ROI 윤곽",
+    )
     parser.add_argument(
         "--plane-mm",
         type=float,
@@ -288,7 +336,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Viewer Min Diff. 기본 51200",
+        help="Viewer Min Diff. 기본 10000",
     )
     parser.add_argument(
         "--noise-max-size",
@@ -354,31 +402,15 @@ def main() -> None:
         noise_filter=not args.no_noise_filter,
         noise_min_diff=noise_min_diff,
         noise_max_size=noise_max_size,
+        hole_filter=True,
     )
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    noise_sliders = not args.no_noise_filter
-    last_min_diff = NOISE_MIN_DIFF_DEFAULT
-    last_max_size = NOISE_MAX_SIZE_DEFAULT
-    if noise_sliders:
-        last_min_diff = int(np.clip(noise_min_diff, 1, NOISE_MIN_DIFF_MAX))
-        last_max_size = int(np.clip(noise_max_size, 1, NOISE_MAX_SIZE_MAX))
-        cv2.createTrackbar(TB_MIN_DIFF, WIN, last_min_diff, NOISE_MIN_DIFF_MAX, lambda *_: None)
-        cv2.createTrackbar(TB_MAX_SIZE, WIN, last_max_size, NOISE_MAX_SIZE_MAX, lambda *_: None)
-        print(
-            f"슬라이더  {TB_MIN_DIFF}=1..{NOISE_MIN_DIFF_MAX}  "
-            f"{TB_MAX_SIZE}=1..{NOISE_MAX_SIZE_MAX}  (Orbbec 문서)"
-        )
-
-    def _sync_noise_sliders() -> None:
-        nonlocal last_min_diff, last_max_size
-        if not noise_sliders:
-            return
-        d = max(1, int(cv2.getTrackbarPos(TB_MIN_DIFF, WIN)))
-        s = max(1, int(cv2.getTrackbarPos(TB_MAX_SIZE, WIN)))
-        if d == last_min_diff and s == last_max_size:
-            return
-        last_min_diff, last_max_size = d, s
-        cam.set_noise_filter(True, d, s)
+    filters = OrbbecFilterPanel(
+        cam,
+        noise_on=not args.no_noise_filter,
+        min_diff=noise_min_diff,
+        max_size=noise_max_size,
+    )
 
     print("Orbbec SDK + YOLO 로드 중...")
     from ultralytics import YOLO
@@ -423,7 +455,7 @@ def main() -> None:
                 vis = np.zeros((480, 640, 3), dtype=np.uint8)
                 cv2.putText(vis, "no RGB-D", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 cv2.imshow(WIN, vis)
-                _sync_noise_sliders()
+                filters.sync()
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
                 continue
@@ -516,6 +548,7 @@ def main() -> None:
                             last_xyz,
                             T_init=T_keep,
                             T_prev=T_keep,
+                            desk_plane=_work_desk_plane(plane, T_bc),
                         ):
                             last_cad_t = now
                             if pose_ok:
@@ -524,16 +557,16 @@ def main() -> None:
             for i, inst in enumerate(instances):
                 x1, y1, x2, y2 = [int(v) for v in inst.xyxy]
                 color = (0, 255, 255) if i == chosen else (0, 180, 0)
+                if args.show_obb and inst.quad is not None:
+                    obb_pts = np.round(inst.quad).astype(np.int32).reshape(-1, 1, 2)
+                    obb_color = (255, 0, 255) if i == chosen else (180, 0, 180)
+                    cv2.polylines(bgr, [obb_pts], True, obb_color, 1, cv2.LINE_AA)
+                    cv2.polylines(depth_vis, [obb_pts], True, obb_color, 1, cv2.LINE_AA)
                 if args.mask:
                     tint = np.zeros_like(bgr)
                     tint[inst.roi] = color
                     cv2.addWeighted(tint, 0.35, bgr, 1.0, 0.0, dst=bgr)
-                    contours, _ = cv2.findContours(
-                        inst.roi.astype(np.uint8),
-                        cv2.RETR_EXTERNAL,
-                        cv2.CHAIN_APPROX_SIMPLE,
-                    )
-                    cv2.drawContours(bgr, contours, -1, color, 1)
+                    _draw_roi_outline(bgr, inst.roi, color, 1)
                     ys, xs = np.nonzero(inst.roi)
                     if len(xs):
                         tag_x = int(xs.min())
@@ -541,16 +574,10 @@ def main() -> None:
                     else:
                         tag_x, tag_y = x1, max(16, y1 - 6)
                 else:
-                    thick = 3 if i == chosen else 2
-                    contours, _ = cv2.findContours(
-                        inst.roi.astype(np.uint8),
-                        cv2.RETR_EXTERNAL,
-                        cv2.CHAIN_APPROX_SIMPLE,
-                    )
-                    if contours:
-                        cv2.drawContours(bgr, contours, -1, color, thick)
-                        cv2.drawContours(depth_vis, contours, -1, color, thick)
-                    else:
+                    thick = 1
+                    drawn = _draw_roi_outline(bgr, inst.roi, color, thick)
+                    _draw_roi_outline(depth_vis, inst.roi, color, thick)
+                    if not drawn:
                         cv2.rectangle(bgr, (x1, y1), (x2, y2), color, thick)
                         cv2.rectangle(depth_vis, (x1, y1), (x2, y2), color, thick)
                     tag_x, tag_y = x1, max(16, y1 - 6)
@@ -638,28 +665,7 @@ def main() -> None:
                     T_draw = invert_T(T_bc) @ T_draw
                 _draw_cad_axes(bgr, T_draw, K)
                 _draw_cad_axes(depth_vis, T_draw, K)
-            if noise_sliders:
-                _sync_noise_sliders()
-                cv2.putText(
-                    depth_vis,
-                    f"{TB_MIN_DIFF}={last_min_diff}  (upper bar  1-{NOISE_MIN_DIFF_MAX})",
-                    (8, 48),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    depth_vis,
-                    f"{TB_MAX_SIZE}={last_max_size}  (lower bar  1-{NOISE_MAX_SIZE_MAX})",
-                    (8, 72),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+            filters.sync()
             panel = np.hstack([bgr, depth_vis])
             cv2.imshow(WIN, panel)
             key = cv2.waitKey(1) & 0xFF
@@ -674,6 +680,7 @@ def main() -> None:
                     last_xyz,
                     T_init=None,
                     T_prev=None if cad_pose is None else cad_pose["T"],
+                    desk_plane=_work_desk_plane(plane, T_bc),
                 ):
                     print("이미 등록 중입니다.")
                 else:
@@ -773,9 +780,9 @@ def main() -> None:
                         f"n={last_pose['n_points']}"
                     )
     finally:
+        cam.close()
         if cad_worker is not None:
             cad_worker.close()
-        cam.close()
         cv2.destroyAllWindows()
 
 

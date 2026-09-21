@@ -11,16 +11,15 @@ Project/
     rgbd.py                Orbbec SDK D2C + 공장 K 읽기
     calib.py               JSON 입출력
     transforms.py          invert_T, rt_to_T, unproject
-    check/
+    handeye/
       vision_test.py       RGB 미리보기
       get_intrinsic.py     SDK → calib_data/intrinsics.json
-    handeye/
       charuco.py           캘리브 보드 검출
       capture.py           펜던트 TCP + ChArUco → png/json
       compute.py           저장 샘플 → T_base_cam (--align-desk)
       compare_pnp_depth.py PnP Z vs 뎁스 Z
     calib_data/
-      intrinsics.json      공장 K (카메라 바꿀 때 check/get_intrinsic.py)
+      intrinsics.json      공장 K (카메라 바꿀 때 get_intrinsic.py)
       eye_to_hand.json     SO-ARM 손-눈
       handeye_tcp/         캡처 샘플
   yolo/
@@ -34,8 +33,8 @@ Project/
 캡처는 펜던트 ON(Connect·토크). 계산만이면 카메라·펜던트 없이 된다.
 
 ```bash
-python vision/check/vision_test.py
-python vision/check/get_intrinsic.py
+python vision/handeye/vision_test.py
+python vision/handeye/get_intrinsic.py
 python vision/handeye/capture.py
 python vision/handeye/compute.py
 python vision/handeye/compute.py --align-desk

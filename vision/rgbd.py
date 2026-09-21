@@ -27,13 +27,41 @@ import numpy as np
 
 ALIGN_D2C_SW = 2
 OB_PROP_LDP_BOOL = 2  # Viewer LDP enable. 공장 기본 켜짐.
+OB_PROP_DEPTH_HOLEFILTER_BOOL = 17  # 펌웨어 HoleFilter. ON/OFF만.
 OB_PROP_DEPTH_SOFT_FILTER_BOOL = 24  # Viewer NoiseRemovalFilter
 OB_PROP_DEPTH_MAX_DIFF_INT = 40  # Viewer Min Diff
 OB_PROP_DEPTH_MAX_SPECKLE_SIZE_INT = 41  # Viewer Max Size
+OB_PROP_COLOR_AUTO_EXPOSURE_BOOL = 2000
+OB_PROP_COLOR_EXPOSURE_INT = 2001
+OB_PROP_COLOR_GAIN_INT = 2002
+OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL = 2016
+OB_PROP_DEPTH_EXPOSURE_INT = 2017
+OB_PROP_DEPTH_GAIN_INT = 2018
 OB_PERMISSION_WRITE = 2
+OB_PERMISSION_ANY = 255
 OB_FORMAT_MJPG = 5
 OB_FORMAT_RGB = 22
 OB_FORMAT_BGR = 23
+
+
+class OBIntRange(Structure):
+    _fields_ = [
+        ("cur", c_int32),
+        ("max", c_int32),
+        ("min", c_int32),
+        ("step", c_int32),
+        ("def", c_int32),
+    ]
+
+
+class OBFloatRange(Structure):
+    _fields_ = [
+        ("cur", c_float),
+        ("max", c_float),
+        ("min", c_float),
+        ("step", c_float),
+        ("def", c_float),
+    ]
 
 
 def _jpeg_complete(raw: np.ndarray) -> bool:
@@ -397,8 +425,9 @@ class OrbbecV1:
         sdk_dir: Path | None = None,
         *,
         noise_filter: bool | None = True,
-        noise_min_diff: int | None = 51200,
+        noise_min_diff: int | None = 10000,
         noise_max_size: int | None = 1,
+        hole_filter: bool | None = True,
         ldp: bool = False,
     ):
         sdk = Path(sdk_dir) if sdk_dir is not None else resolve_sdk_dir()
@@ -430,6 +459,37 @@ class OrbbecV1:
             self._prop_ok = _bind(
                 L, "ob_device_is_property_supported", c_bool, c_void_p, c_int, c_int, EP
             )
+            self._get_int_range = _bind(
+                L,
+                "ob_device_get_int_property_range",
+                OBIntRange,
+                c_void_p,
+                c_int,
+                EP,
+            )
+            self._create_temporal = _bind(L, "ob_create_temporal_filter", c_void_p, EP)
+            self._temporal_w_range = _bind(
+                L, "ob_temporal_filter_get_weight_range", OBFloatRange, c_void_p, EP
+            )
+            self._temporal_d_range = _bind(
+                L, "ob_temporal_filter_get_diffscale_range", OBFloatRange, c_void_p, EP
+            )
+            self._temporal_set_w = _bind(
+                L, "ob_temporal_filter_set_weight_value", None, c_void_p, c_float, EP
+            )
+            self._temporal_set_d = _bind(
+                L, "ob_temporal_filter_set_diffscale_value", None, c_void_p, c_float, EP
+            )
+            self._create_holefill = _bind(L, "ob_create_holefilling_filter", c_void_p, EP)
+            self._holefill_set_mode = _bind(
+                L, "ob_holefilling_filter_set_mode", None, c_void_p, c_int, EP
+            )
+            self._filter_enable = _bind(L, "ob_filter_enable", None, c_void_p, c_bool, EP)
+            self._filter_reset = _bind(L, "ob_filter_reset", None, c_void_p, EP)
+            self._filter_process = _bind(
+                L, "ob_filter_process", c_void_p, c_void_p, c_void_p, EP
+            )
+            self._del_filter = _bind(L, "ob_delete_filter", None, c_void_p, EP)
             self._start = _bind(L, "ob_pipeline_start_with_config", None, c_void_p, c_void_p, EP)
             self._wait = _bind(
                 L, "ob_pipeline_wait_for_frameset", c_void_p, c_void_p, c_uint32, EP
@@ -445,6 +505,7 @@ class OrbbecV1:
             self._del_frame = _bind(L, "ob_delete_frame", None, c_void_p, EP)
             self._stop = _bind(L, "ob_pipeline_stop", None, c_void_p, EP)
             self._del_pipe = _bind(L, "ob_delete_pipeline", None, c_void_p, EP)
+            self._set_log = _bind(L, "ob_set_logger_severity", None, c_int, EP)
             self._errmsg = _bind(L, "ob_error_message", c_char_p, c_void_p)
             self._delerr = _bind(L, "ob_delete_error", None, c_void_p)
 
@@ -463,9 +524,16 @@ class OrbbecV1:
                 self._delerr(err)
             self._apply_ldp(ldp)
             self._apply_noise_filter(noise_filter, noise_min_diff, noise_max_size)
+            self._apply_hole_filter(hole_filter)
+            self._temporal = None
+            self._temporal_on = False
+            self._holefill = None
+            self._holefill_on = False
             err = c_void_p()
             self._start(self.pipe, self.cfg, byref(err))
             self._chk(err, "start — Viewer 끄기")
+            self._init_temporal_filter()
+            self._init_holefill_filter()
         finally:
             os.chdir(cwd)
         self._last_bgr = None
@@ -477,9 +545,9 @@ class OrbbecV1:
             self._delerr(err)
             raise RuntimeError(f"{where}: {msg.decode(errors='replace')}")
 
-    def _prop_supported(self, dev, prop_id: int) -> bool:
+    def _prop_supported(self, dev, prop_id: int, permission: int = OB_PERMISSION_WRITE) -> bool:
         err = c_void_p()
-        ok = bool(self._prop_ok(dev, prop_id, OB_PERMISSION_WRITE, byref(err)))
+        ok = bool(self._prop_ok(dev, prop_id, permission, byref(err)))
         if err:
             self._delerr(err)
             return False
@@ -599,6 +667,367 @@ class OrbbecV1:
             f"on={cur['on']}  min_diff={cur['min_diff']}  max_size={cur['max_size']}"
         )
 
+    def _int_range(self, prop_id: int, fallback: tuple[int, int]) -> tuple[int, int]:
+        dev = self._device_ptr()
+        if not dev:
+            return fallback
+        err = c_void_p()
+        try:
+            rng = self._get_int_range(dev, prop_id, byref(err))
+        except Exception:
+            if err:
+                self._delerr(err)
+            return fallback
+        if err:
+            self._delerr(err)
+            return fallback
+        lo, hi = int(rng.min), int(rng.max)
+        if hi <= lo:
+            return fallback
+        return lo, hi
+
+    def has_property(self, prop_id: int) -> bool:
+        dev = self._device_ptr()
+        if not dev:
+            return False
+        return self._prop_supported(dev, prop_id, OB_PERMISSION_ANY)
+
+    def get_hole_filter(self) -> bool | None:
+        dev = self._device_ptr()
+        if not dev:
+            return None
+        return self._get_bool_prop(dev, OB_PROP_DEPTH_HOLEFILTER_BOOL)
+
+    def set_hole_filter(self, enable: bool, *, quiet: bool = False) -> bool | None:
+        self._apply_hole_filter(bool(enable), quiet=quiet)
+        return self.get_hole_filter()
+
+    def _apply_hole_filter(self, enable: bool | None, *, quiet: bool = False) -> None:
+        if enable is None:
+            return
+        dev = self._device_ptr()
+        if not dev:
+            print("HoleFilter: device 없음")
+            return
+        self._set_bool_prop(dev, OB_PROP_DEPTH_HOLEFILTER_BOOL, bool(enable), "HoleFilter")
+        if quiet:
+            return
+        print(f"HoleFilter on={self.get_hole_filter()}")
+
+    def get_depth_exposure(self) -> dict:
+        dev = self._device_ptr()
+        if not dev:
+            return {"ae": None, "exposure": None, "gain": None}
+        ae = None
+        if self._prop_supported(dev, OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL, OB_PERMISSION_ANY):
+            ae = self._get_bool_prop(dev, OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL)
+        return {
+            "ae": ae,
+            "exposure": self._get_int_prop(dev, OB_PROP_DEPTH_EXPOSURE_INT),
+            "gain": self._get_int_prop(dev, OB_PROP_DEPTH_GAIN_INT),
+        }
+
+    def set_depth_exposure(
+        self,
+        *,
+        ae: bool | None = None,
+        exposure: int | None = None,
+        gain: int | None = None,
+        quiet: bool = False,
+    ) -> dict:
+        dev = self._device_ptr()
+        if not dev:
+            print("Depth exposure: device 없음")
+            return self.get_depth_exposure()
+        has_ae = self._prop_supported(
+            dev, OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL, OB_PERMISSION_WRITE
+        )
+        if ae is not None and has_ae:
+            self._set_bool_prop(dev, OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL, bool(ae), "Depth AE")
+        ae_on = False
+        if has_ae:
+            ae_on = bool(self._get_bool_prop(dev, OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL))
+        if ae_on:
+            if not quiet:
+                cur = self.get_depth_exposure()
+                print(f"Depth AE on  exp={cur['exposure']}  gain={cur['gain']}")
+            return self.get_depth_exposure()
+        if exposure is not None:
+            self._set_int_prop(dev, OB_PROP_DEPTH_EXPOSURE_INT, exposure, "Depth Exposure")
+        if gain is not None:
+            self._set_int_prop(dev, OB_PROP_DEPTH_GAIN_INT, gain, "Depth Gain")
+        if not quiet:
+            cur = self.get_depth_exposure()
+            print(
+                f"Depth AE={cur['ae']}  exp={cur['exposure']}  gain={cur['gain']}"
+            )
+        return self.get_depth_exposure()
+
+    def get_color_exposure(self) -> dict:
+        dev = self._device_ptr()
+        if not dev:
+            return {"ae": None, "exposure": None, "gain": None}
+        ae = None
+        if self._prop_supported(dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, OB_PERMISSION_ANY):
+            ae = self._get_bool_prop(dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL)
+        return {
+            "ae": ae,
+            "exposure": self._get_int_prop(dev, OB_PROP_COLOR_EXPOSURE_INT),
+            "gain": self._get_int_prop(dev, OB_PROP_COLOR_GAIN_INT),
+        }
+
+    def set_color_exposure(
+        self,
+        *,
+        ae: bool | None = None,
+        exposure: int | None = None,
+        gain: int | None = None,
+        quiet: bool = False,
+    ) -> dict:
+        dev = self._device_ptr()
+        if not dev:
+            print("Color exposure: device 없음")
+            return self.get_color_exposure()
+        has_ae = self._prop_supported(
+            dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, OB_PERMISSION_WRITE
+        )
+        if ae is not None and has_ae:
+            self._set_bool_prop(dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, bool(ae), "Color AE")
+        ae_on = False
+        if has_ae:
+            ae_on = bool(self._get_bool_prop(dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL))
+        if ae_on:
+            if not quiet:
+                cur = self.get_color_exposure()
+                print(f"Color AE on  exp={cur['exposure']}  gain={cur['gain']}")
+            return self.get_color_exposure()
+        if exposure is not None:
+            self._set_int_prop(dev, OB_PROP_COLOR_EXPOSURE_INT, exposure, "Color Exposure")
+        if gain is not None:
+            self._set_int_prop(dev, OB_PROP_COLOR_GAIN_INT, gain, "Color Gain")
+        if not quiet:
+            cur = self.get_color_exposure()
+            print(
+                f"Color AE={cur['ae']}  exp={cur['exposure']}  gain={cur['gain']}"
+            )
+        return self.get_color_exposure()
+
+    def _init_temporal_filter(self) -> None:
+        self._temporal = None
+        self._temporal_on = False
+        self._temporal_weight = 0.4
+        self._temporal_diff = 0.1
+        self._temporal_weight_range = (0.0, 1.0)
+        self._temporal_diff_range = (0.0, 1.0)
+        err = c_void_p()
+        filt = self._create_temporal(byref(err))
+        if err:
+            msg = self._errmsg(err) or b""
+            self._delerr(err)
+            print(f"TemporalFilter: 생성 실패 ({msg.decode(errors='replace')})")
+            return
+        if not filt:
+            print("TemporalFilter: 생성 실패")
+            return
+        self._temporal = filt
+        e = c_void_p()
+        wr = self._temporal_w_range(filt, byref(e))
+        if e:
+            self._delerr(e)
+        else:
+            lo, hi = float(wr.min), float(wr.max)
+            if hi > lo:
+                self._temporal_weight_range = (lo, hi)
+                default = float(getattr(wr, "def"))
+                self._temporal_weight = (
+                    default if default == default else (lo + hi) * 0.5
+                )
+        e = c_void_p()
+        dr = self._temporal_d_range(filt, byref(e))
+        if e:
+            self._delerr(e)
+        else:
+            lo, hi = float(dr.min), float(dr.max)
+            if hi > lo:
+                self._temporal_diff_range = (lo, hi)
+                default = float(getattr(dr, "def"))
+                self._temporal_diff = (
+                    default if default == default else (lo + hi) * 0.5
+                )
+        e = c_void_p()
+        self._filter_enable(filt, False, byref(e))
+        if e:
+            self._delerr(e)
+        print(
+            "TemporalFilter off  "
+            f"weight={self._temporal_weight:.3f} "
+            f"({self._temporal_weight_range[0]:.3f}-{self._temporal_weight_range[1]:.3f})  "
+            f"diff={self._temporal_diff:.3f} "
+            f"({self._temporal_diff_range[0]:.3f}-{self._temporal_diff_range[1]:.3f})"
+        )
+
+    def get_temporal_filter(self) -> dict:
+        return {
+            "ok": self._temporal is not None,
+            "on": self._temporal_on,
+            "weight": self._temporal_weight,
+            "diffscale": self._temporal_diff,
+            "weight_range": self._temporal_weight_range,
+            "diffscale_range": self._temporal_diff_range,
+        }
+
+    def set_temporal_filter(
+        self,
+        enable: bool | None = None,
+        weight: float | None = None,
+        diffscale: float | None = None,
+        *,
+        quiet: bool = False,
+    ) -> dict:
+        filt = self._temporal
+        if filt is None:
+            return self.get_temporal_filter()
+        wlo, whi = self._temporal_weight_range
+        dlo, dhi = self._temporal_diff_range
+        if weight is not None:
+            self._temporal_weight = float(np.clip(weight, wlo, whi))
+            e = c_void_p()
+            self._temporal_set_w(filt, c_float(self._temporal_weight), byref(e))
+            if e:
+                self._delerr(e)
+        if diffscale is not None:
+            self._temporal_diff = float(np.clip(diffscale, dlo, dhi))
+            e = c_void_p()
+            self._temporal_set_d(filt, c_float(self._temporal_diff), byref(e))
+            if e:
+                self._delerr(e)
+        if enable is not None:
+            on = bool(enable)
+            if on != self._temporal_on and not on:
+                e = c_void_p()
+                self._filter_reset(filt, byref(e))
+                if e:
+                    self._delerr(e)
+            self._temporal_on = on
+            e = c_void_p()
+            self._filter_enable(filt, on, byref(e))
+            if e:
+                self._delerr(e)
+        if not quiet:
+            cur = self.get_temporal_filter()
+            print(
+                f"TemporalFilter on={cur['on']}  "
+                f"weight={cur['weight']:.3f}  diff={cur['diffscale']:.3f}"
+            )
+        return self.get_temporal_filter()
+
+    def _init_holefill_filter(self) -> None:
+        self._holefill = None
+        self._holefill_on = False
+        self._holefill_mode = 1
+        err = c_void_p()
+        filt = self._create_holefill(byref(err))
+        if err:
+            msg = self._errmsg(err) or b""
+            self._delerr(err)
+            print(f"HoleFillingFilter: 생성 실패 ({msg.decode(errors='replace')})")
+            return
+        if not filt:
+            print("HoleFillingFilter: 생성 실패")
+            return
+        self._holefill = filt
+        e = c_void_p()
+        self._holefill_set_mode(filt, int(self._holefill_mode), byref(e))
+        if e:
+            self._delerr(e)
+        e = c_void_p()
+        self._filter_enable(filt, False, byref(e))
+        if e:
+            self._delerr(e)
+        print("HoleFillingFilter off  mode=Nearest")
+
+    def set_hole_filling(
+        self,
+        enable: bool | None = None,
+        mode: int | None = None,
+        *,
+        quiet: bool = False,
+    ) -> dict:
+        filt = getattr(self, "_holefill", None)
+        if filt is None:
+            return {"ok": False, "on": False, "mode": None}
+        if mode is not None:
+            self._holefill_mode = int(np.clip(mode, 0, 2))
+            e = c_void_p()
+            self._holefill_set_mode(filt, self._holefill_mode, byref(e))
+            if e:
+                self._delerr(e)
+        if enable is not None:
+            self._holefill_on = bool(enable)
+            e = c_void_p()
+            self._filter_enable(filt, self._holefill_on, byref(e))
+            if e:
+                self._delerr(e)
+        names = ("Top", "Nearest", "Farest")
+        if not quiet:
+            print(
+                f"HoleFillingFilter on={self._holefill_on}  "
+                f"mode={names[self._holefill_mode]}"
+            )
+        return self.get_hole_filling()
+
+    def get_hole_filling(self) -> dict:
+        ok = getattr(self, "_holefill", None) is not None
+        return {
+            "ok": ok,
+            "on": bool(getattr(self, "_holefill_on", False)),
+            "mode": int(getattr(self, "_holefill_mode", 1)),
+        }
+
+    def _run_host_filters(self, depth):
+        chain = (
+            (getattr(self, "_temporal", None), getattr(self, "_temporal_on", False)),
+            (getattr(self, "_holefill", None), getattr(self, "_holefill_on", False)),
+        )
+        for filt, on in chain:
+            if not on or filt is None:
+                continue
+            e = c_void_p()
+            out = self._filter_process(filt, depth, byref(e))
+            if e:
+                self._delerr(e)
+                continue
+            if out:
+                e = c_void_p()
+                self._del_frame(depth, byref(e))
+                depth = out
+        return depth
+
+    def depth_ui_caps(self) -> dict:
+        exp_lo, exp_hi = self._int_range(OB_PROP_DEPTH_EXPOSURE_INT, (0, 10000))
+        gain_lo, gain_hi = self._int_range(OB_PROP_DEPTH_GAIN_INT, (0, 9999))
+        cexp_lo, cexp_hi = self._int_range(OB_PROP_COLOR_EXPOSURE_INT, (1, 10000))
+        cgain_lo, cgain_hi = self._int_range(OB_PROP_COLOR_GAIN_INT, (0, 255))
+        diff_lo, diff_hi = self._int_range(OB_PROP_DEPTH_MAX_DIFF_INT, (1, 10000))
+        size_lo, size_hi = self._int_range(OB_PROP_DEPTH_MAX_SPECKLE_SIZE_INT, (1, 1000))
+        return {
+            "hole": self.has_property(OB_PROP_DEPTH_HOLEFILTER_BOOL),
+            "ae": self.has_property(OB_PROP_DEPTH_AUTO_EXPOSURE_BOOL),
+            "exposure": self.has_property(OB_PROP_DEPTH_EXPOSURE_INT),
+            "gain": self.has_property(OB_PROP_DEPTH_GAIN_INT),
+            "color_ae": self.has_property(OB_PROP_COLOR_AUTO_EXPOSURE_BOOL),
+            "color_exposure": self.has_property(OB_PROP_COLOR_EXPOSURE_INT),
+            "color_gain": self.has_property(OB_PROP_COLOR_GAIN_INT),
+            "temporal": self._temporal is not None,
+            "holefill": self._holefill is not None,
+            "exposure_range": (exp_lo, exp_hi),
+            "gain_range": (gain_lo, gain_hi),
+            "color_exposure_range": (cexp_lo, cexp_hi),
+            "color_gain_range": (cgain_lo, cgain_hi),
+            "min_diff_range": (max(1, diff_lo), max(diff_lo + 1, diff_hi)),
+            "max_size_range": (max(1, size_lo), max(size_lo + 1, size_hi)),
+        }
+
     def grab(self, timeout_ms=1000):
         err = c_void_p()
         fs = self._wait(self.pipe, timeout_ms, byref(err))
@@ -617,6 +1046,7 @@ class OrbbecV1:
             e = c_void_p()
             self._del_frame(color, byref(e))
         if depth:
+            depth = self._run_host_filters(depth)
             self._last_depth = self._depth_to_mm(depth)
             e = c_void_p()
             self._del_frame(depth, byref(e))
@@ -656,10 +1086,88 @@ class OrbbecV1:
         raw = np.ctypeslib.as_array((c_uint16 * (n // 2)).from_address(ptr)).copy()
         return raw.reshape(h, w).astype(np.float32) * scale
 
+    def _quiet_log(self) -> None:
+        """stop 때 libusb cancel Success 경고가 쏟아지지 않게 한다."""
+        fn = getattr(self, "_set_log", None)
+        if fn is None:
+            return
+        err = c_void_p()
+        try:
+            fn(3, byref(err))  # OB_LOG_SEVERITY_ERROR
+        except TypeError:
+            try:
+                fn(3)
+            except Exception:
+                return
+        if err:
+            self._delerr(err)
+
+    def _drain_frames(self) -> None:
+        pipe = getattr(self, "pipe", None)
+        if not pipe:
+            return
+        for _ in range(16):
+            e = c_void_p()
+            fs = self._wait(pipe, 1, byref(e))
+            if e:
+                self._delerr(e)
+            if not fs:
+                return
+            e = c_void_p()
+            self._del_frame(fs, byref(e))
+
     def close(self):
+        self._temporal_on = False
+        self._holefill_on = False
+        self._quiet_log()
+        host = [
+            getattr(self, "_temporal", None),
+            getattr(self, "_holefill", None),
+        ]
+        for filt in host:
+            if not filt:
+                continue
+            e = c_void_p()
+            try:
+                self._filter_enable(filt, False, byref(e))
+            except Exception:
+                pass
+            if e:
+                self._delerr(e)
+            e = c_void_p()
+            try:
+                self._filter_reset(filt, byref(e))
+            except Exception:
+                pass
+            if e:
+                self._delerr(e)
+        self._drain_frames()
         if getattr(self, "pipe", None):
             e = c_void_p()
             self._stop(self.pipe, byref(e))
+            if e:
+                self._delerr(e)
+        for name in ("_temporal", "_holefill"):
+            filt = getattr(self, name, None)
+            if not filt:
+                continue
+            e = c_void_p()
+            try:
+                self._del_filter(filt, byref(e))
+            except Exception:
+                pass
+            if e:
+                try:
+                    self._delerr(e)
+                except Exception:
+                    pass
+            setattr(self, name, None)
+        if getattr(self, "pipe", None):
             e = c_void_p()
             self._del_pipe(self.pipe, byref(e))
+            if e:
+                try:
+                    self._delerr(e)
+                except Exception:
+                    pass
             self.pipe = None

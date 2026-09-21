@@ -2,6 +2,7 @@
 """Orbbec RGB에서 학습용 프레임을 저장한다.
 
 펜던트·비전 캘리브와 동시에 켜지 말 것. 카메라가 하나만 열린다.
+열리면 Orbbec filters 창이 같이 뜬다 (Color exposure/gain 등).
 
   프로젝트 루트에서
   conda activate lerobot

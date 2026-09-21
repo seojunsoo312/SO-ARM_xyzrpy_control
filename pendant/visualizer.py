@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from collections import deque
 from pathlib import Path
 
 _PROJECT = Path(__file__).resolve().parent.parent
@@ -33,6 +35,9 @@ PAGE_TITLE = "시뮬레이터"
 # Project base axes (overlay): +X forward; see motion/base_frame.py.
 CAM_POSITION = (0.70, 0.32, 0.0)
 OVERLAY_ROOT = "teach"
+TCP_TRAIL_SEC = 10.0
+TCP_TRAIL_MIN_M = 0.001  # 1 mm
+TCP_TRAIL_COLOR = 0xFB923C
 
 # RGB matching meshcat.geometry.triad (X red, Y green, Z blue).
 _AXIS_COLORS = (0xE53935, 0x43A047, 0x1E88E8)
@@ -183,6 +188,9 @@ class Visualizer:
         self._mark_origin()
         # Project-base triad (same +X-forward frame as /Axes).
         self.set_overlay_axes("base", T_urdf_from_user_matrix(), scale=0.06)
+        self._tcp_trail: deque[tuple[float, np.ndarray]] = deque()
+        self._trail_last: np.ndarray | None = None
+        self._tcp_trail_on = True
 
     def _mark_origin(self) -> None:
         """Red sphere at shared URDF / project-base origin (0,0,0)."""
@@ -308,11 +316,36 @@ class Visualizer:
     ) -> None:
         p0 = np.asarray(p0_m, dtype=np.float32).reshape(3)
         p1 = np.asarray(p1_m, dtype=np.float32).reshape(3)
+        self.set_overlay_lines(name, np.column_stack([p0, p1]), color=color)
+
+    def set_overlay_lines(
+        self,
+        name: str,
+        points_m: np.ndarray,
+        *,
+        color: int = 0xFACC15,
+        closed: bool = False,
+    ) -> None:
+        """Polyline in world meters. points are (3, N) or (N, 3)."""
+        pts = np.asarray(points_m, dtype=np.float32)
+        if pts.ndim != 2:
+            raise ValueError("points_m must be 2D")
+        if pts.shape[0] == 3 and pts.shape[1] != 3:
+            xyz = pts.T
+        else:
+            xyz = pts.reshape(-1, 3)
+        if len(xyz) < 2:
+            return
+        if closed:
+            xyz = np.vstack([xyz, xyz[0:1]])
+        pairs = np.column_stack(
+            [c for a, b in zip(xyz[:-1], xyz[1:]) for c in (a, b)]
+        ).astype(np.float32)
         node = self._overlay(name)
         node.set_object(
             g.LineSegments(
-                g.PointsGeometry(position=np.column_stack([p0, p1])),
-                g.LineBasicMaterial(color=int(color), linewidth=3),
+                g.PointsGeometry(position=pairs),
+                g.LineBasicMaterial(color=int(color), linewidth=2),
             )
         )
         node.set_transform(np.eye(4))
@@ -341,8 +374,54 @@ class Visualizer:
             T[:3, 3] = np.asarray(c, dtype=float).reshape(3)
             node.set_transform(T)
 
+    def set_tcp_trail_enabled(self, enabled: bool) -> None:
+        self._tcp_trail_on = bool(enabled)
+        if self._tcp_trail_on:
+            return
+        self._tcp_trail.clear()
+        self._trail_last = None
+        try:
+            self._viz.viewer["tcp_trail"].delete()
+        except Exception:
+            pass
+
+    def _update_tcp_trail(self, q: np.ndarray) -> None:
+        """TCP 경로. 점은 10초 뒤 만료되어 선이 사라진다."""
+        if not self._tcp_trail_on:
+            return
+        now = time.monotonic()
+        xyz = np.asarray(self._kin.forward_tcp(q).xyz_m, dtype=float).reshape(3)
+        if (
+            self._trail_last is None
+            or float(np.linalg.norm(xyz - self._trail_last)) >= TCP_TRAIL_MIN_M
+        ):
+            self._tcp_trail.append((now, xyz.copy()))
+            self._trail_last = xyz.copy()
+        while self._tcp_trail and now - self._tcp_trail[0][0] > TCP_TRAIL_SEC:
+            self._tcp_trail.popleft()
+        node = self._viz.viewer["tcp_trail"]
+        if len(self._tcp_trail) < 2:
+            if not self._tcp_trail:
+                self._trail_last = None
+            try:
+                node.delete()
+            except Exception:
+                pass
+            return
+        pts = [p for _, p in self._tcp_trail]
+        pairs = np.column_stack(
+            [c for a, b in zip(pts[:-1], pts[1:]) for c in (a, b)]
+        ).astype(np.float32)
+        node.set_object(
+            g.LineSegments(
+                g.PointsGeometry(position=pairs),
+                g.LineBasicMaterial(color=TCP_TRAIL_COLOR, linewidth=3),
+            )
+        )
+
     def display(self, q: np.ndarray) -> None:
         self._viz.display(q)
+        self._update_tcp_trail(q)
 
     @property
     def url(self) -> str:

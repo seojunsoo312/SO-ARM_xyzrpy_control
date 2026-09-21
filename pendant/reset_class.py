@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """교육 산출물을 지워 다음 기수를 처음부터 돌리게 한다.
 
-목록을 보여 준 뒤 y 를 입력해야 지운다.
+목록을 보여 준 뒤 yes 를 입력해야 지운다. -y 는 확인을 건너뛴다.
 
-  python pendant/reset_class.py --yolo          # 촬영·라벨·학습
-  python pendant/reset_class.py --calib         # intrinsic + 손눈 샘플·결과
-  python pendant/reset_class.py --ply           # 점군 ply
-  python pendant/reset_class.py --all           # 위 전부
+  python pendant/reset_class.py --yolo
+  python pendant/reset_class.py --calib
+  python pendant/reset_class.py --ply
+  python pendant/reset_class.py --all
+  python pendant/reset_class.py --all -y       # 확인 생략
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ YOLO = PROJECT / "yolo"
 VISION = PROJECT / "vision"
 
 SKIP_DIR_NAMES = {".git", ".venv", "venv", "node_modules"}
+
 
 def _restore_data_yaml() -> None:
     dest = YOLO / "data.yaml"
@@ -116,13 +118,13 @@ def _delete(path: Path) -> None:
 
 
 def _confirm_delete(n: int) -> bool:
-    prompt = f"위 {n}개를 삭제하려면 y 입력 (그 외는 취소): "
+    prompt = f"위 {n}개를 삭제하려면 yes 를 입력하세요 (그 외는 취소): "
     try:
         raw = input(prompt).strip().lower()
     except EOFError:
         print("입력이 없어 취소했습니다.")
         return False
-    if raw == "y":
+    if raw == "yes":
         return True
     print("취소했습니다.")
     return False
@@ -130,23 +132,37 @@ def _confirm_delete(n: int) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="교육 산출물 초기화. 목록 확인 후 y 를 입력해야 삭제."
+        description="교육 산출물 초기화. 목록 확인 후 yes 입력으로 삭제.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "예:\n"
+            "  python pendant/reset_class.py --all\n"
+            "  python pendant/reset_class.py --all -y\n"
+        ),
     )
-    parser.add_argument("--yolo", action="store_true", help="이미지·라벨·splits·runs·best.pt")
-    parser.add_argument(
+    scope = parser.add_argument_group("범위 (하나 이상)")
+    scope.add_argument("--yolo", action="store_true", help="이미지·라벨·splits·runs·best.pt")
+    scope.add_argument(
         "--calib",
         action="store_true",
-        help="get_intrinsic + 손눈 샘플 + compute 결과(eye_to_hand.json)",
+        help="intrinsics.json + 손눈 샘플 + eye_to_hand.json",
     )
-    parser.add_argument("--ply", action="store_true", help="프로젝트 안 ply")
-    parser.add_argument("--all", action="store_true", help="--yolo --calib --ply")
+    scope.add_argument("--ply", action="store_true", help="프로젝트 안 *.ply")
+    scope.add_argument("--all", action="store_true", help="--yolo --calib --ply")
+    act = parser.add_argument_group("실행")
+    act.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="확인 프롬프트 생략하고 바로 삭제",
+    )
     args = parser.parse_args()
 
     yolo = args.yolo or args.all
     calib = args.calib or args.all
     ply = args.ply or args.all
     if not (yolo or calib or ply):
-        parser.error("--yolo, --calib, --ply, --all 중 하나를 주세요.")
+        parser.error("--yolo / --calib / --ply / --all 중 하나를 주세요.")
 
     selected: list[tuple[str, list[Path]]] = []
     if yolo:
@@ -170,8 +186,7 @@ def main() -> None:
             rel = path.relative_to(PROJECT) if path.is_relative_to(PROJECT) else path
             print(f"  {rel}")
 
-    if not args.yes:
-        print("삭제하지 않았습니다. 지우려면 같은 인자에 -y 를 붙이세요.")
+    if not args.yes and not _confirm_delete(len(all_paths)):
         return
 
     failed = 0
@@ -190,7 +205,11 @@ def main() -> None:
         print(f"복구 {YOLO / 'data.yaml'}")
     print(f"삭제 {deleted}개" + (f"  실패 {failed}개" if failed else ""))
     if calib:
-        print("다음 교육: python vision/check/get_intrinsic.py  →  python vision/handeye/capture.py  →  python vision/handeye/compute.py")
+        print(
+            "다음 교육: python vision/handeye/get_intrinsic.py"
+            "  →  python vision/handeye/capture.py"
+            "  →  python vision/handeye/compute.py"
+        )
 
 
 if __name__ == "__main__":

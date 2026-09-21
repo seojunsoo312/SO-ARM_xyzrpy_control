@@ -1,6 +1,7 @@
 """Table pick-and-place sequence. No GUI, no YOLO.
 
-Same desk, same TCP RPY at pick and place. Place Z = grasp Z.
+Pick uses grasp TCP RPY. Place-down yaws so TCP Rx ∥ project-base +X.
+Place Z = grasp Z.
 State is just idle/running/done/fault plus a step index — not a BT.
 """
 
@@ -13,7 +14,12 @@ import numpy as np
 
 from motion.controller import Controller
 from motion.hw_controller import grip_100_to_user
-from motion.robot_kinematics import GRIPPER_JOINT, INIT_POSE_JOINTS_DEG
+from motion.robot_kinematics import (
+    GRIPPER_JOINT,
+    INIT_POSE_JOINTS_DEG,
+    rotmat_to_rpy_deg,
+    rpy_deg_to_rotmat,
+)
 
 PICK_LIFT_MM = 30.0
 PLACE_APPROACH_MM = 50.0
@@ -21,7 +27,7 @@ PLACE_APPROACH_MM = 50.0
 GRIPPER_OPEN_100 = 30.0
 GRIPPER_CLOSE_100 = 0.0
 # 스텝과 스텝 사이 대기 (초). 0 이면 바로 다음.
-STEP_PAUSE_S = 2.0
+STEP_PAUSE_S = 1.0
 # Joint go-to reports this when already there — treat as success.
 _ALREADY = "already at joint target"
 
@@ -162,6 +168,38 @@ class PickPlaceRunner:
         return True
 
 
+def rpy_tcp_rx_parallel_base_x(rpy_deg: np.ndarray) -> np.ndarray:
+    """Keep grasp pitch as far as possible; set TCP X exactly ∥ project-base X.
+
+    Sign of TCP X (and 180° about X) is the one closer to ``rpy_deg``.
+    """
+    R0 = rpy_deg_to_rotmat(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
+    y0 = np.asarray(R0[:, 1], dtype=float)
+    best_R = R0
+    best_err = None
+    for sx in (1.0, -1.0):
+        x = np.array([sx, 0.0, 0.0], dtype=float)
+        y = y0 - x * float(np.dot(y0, x))
+        yn = float(np.linalg.norm(y))
+        if yn < 1e-9:
+            y = np.array([0.0, 0.0, 1.0], dtype=float)
+            y = y - x * float(np.dot(y, x))
+            yn = float(np.linalg.norm(y))
+        y = y / yn
+        z = np.cross(x, y)
+        z = z / float(np.linalg.norm(z))
+        y = np.cross(z, x)
+        for R in (
+            np.column_stack([x, y, z]),
+            np.column_stack([x, -y, -z]),
+        ):
+            err = float(np.linalg.norm(R - R0, ord="fro"))
+            if best_err is None or err < best_err:
+                best_err = err
+                best_R = R
+    return rotmat_to_rpy_deg(best_R)
+
+
 def build_pick_place_steps(
     *,
     p_xyz_mm: np.ndarray,
@@ -174,11 +212,12 @@ def build_pick_place_steps(
     pick_lift_mm: float = PICK_LIFT_MM,
     place_approach_mm: float = PLACE_APPROACH_MM,
 ) -> list[PickPlaceStep]:
-    """Linear table pick-and-place. Place Z/RPY copied from grasp TCP."""
+    """Linear table pick-and-place. Place Z from grasp TCP; place RPY aligns TCP Rx ∥ base X."""
     p_xyz = np.asarray(p_xyz_mm, dtype=float).reshape(3)
     g_xyz = np.asarray(g_xyz_mm, dtype=float).reshape(3)
     p_rpy = np.asarray(p_rpy_deg, dtype=float).reshape(3)
     g_rpy = np.asarray(g_rpy_deg, dtype=float).reshape(3)
+    drop_rpy = rpy_tcp_rx_parallel_base_x(g_rpy)
     drop_xy = np.asarray(drop_xy_mm, dtype=float).reshape(2)
     z_g = float(g_xyz[2])
     z_lift = z_g + float(pick_lift_mm)
@@ -206,15 +245,15 @@ def build_pick_place_steps(
         ee("G", g_xyz, g_rpy),
         grip("그리퍼 닫기", close_100),
         ee("집기 리프트", np.array([gx, gy, z_lift]), g_rpy),
-        ee("드롭 XY", np.array([dx, dy, z_xy]), g_rpy, joints=True),
+        ee("드롭 XY", np.array([dx, dy, z_xy]), drop_rpy, joints=True),
     ]
     if z_xy > z_hi + 1e-6:
-        steps.append(ee("드롭 위", np.array([dx, dy, z_hi]), g_rpy))
+        steps.append(ee("드롭 위", np.array([dx, dy, z_hi]), drop_rpy))
     steps.extend(
         [
-            ee("하강", np.array([dx, dy, z_g]), g_rpy),
+            ee("하강", np.array([dx, dy, z_g]), drop_rpy),
             grip("그리퍼 열기", open_100),
-            ee("놓기 리프트", np.array([dx, dy, z_hi]), g_rpy),
+            ee("놓기 리프트", np.array([dx, dy, z_hi]), drop_rpy),
             PickPlaceStep(
                 name="초기자세",
                 kind="joints",
