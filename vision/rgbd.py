@@ -796,7 +796,13 @@ class OrbbecV1:
         ae_on = False
         if has_ae:
             ae_on = bool(self._get_bool_prop(dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL))
-        if ae_on:
+            # ae=False 요청인데 읽기가 아직 True 면 한 번 더 끄고 수동값 적용
+            if ae is False and ae_on:
+                self._set_bool_prop(
+                    dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, False, "Color AE"
+                )
+                ae_on = bool(self._get_bool_prop(dev, OB_PROP_COLOR_AUTO_EXPOSURE_BOOL))
+        if ae_on and ae is not False:
             if not quiet:
                 cur = self.get_color_exposure()
                 print(f"Color AE on  exp={cur['exposure']}  gain={cur['gain']}")
@@ -1035,6 +1041,23 @@ class OrbbecV1:
             self._delerr(err)
         if not fs:
             return self._last_bgr, self._last_depth
+        return self._consume_frameset(fs)
+
+    def flush(self, max_n: int = 24) -> int:
+        """쌓인 frameset 을 버리고 최신만 남긴다. 느린 추론 중 USB 큐 폭주 완화."""
+        dropped = 0
+        for _ in range(max(0, int(max_n))):
+            err = c_void_p()
+            fs = self._wait(self.pipe, 1, byref(err))
+            if err:
+                self._delerr(err)
+            if not fs:
+                break
+            self._consume_frameset(fs)
+            dropped += 1
+        return dropped
+
+    def _consume_frameset(self, fs):
         e = c_void_p()
         color = self._color_f(fs, byref(e))
         e = c_void_p()

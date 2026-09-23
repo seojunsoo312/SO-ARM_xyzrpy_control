@@ -289,16 +289,27 @@ def rpy_body_xyz_to_extrinsic(
     return float(_wrap_deg(out[0])), float(_wrap_deg(out[1])), float(_wrap_deg(out[2]))
 
 
+def canonicalize_extrinsic_rpy(
+    rpy_deg: tuple[float, float, float] | np.ndarray,
+) -> tuple[float, float, float]:
+    """같은 회전에 대해 베이스 RPY 숫자를 하나로 고정.
+
+    Ry≈±90 짐벌에서 ``rotmat_to_rpy`` 분기가 갈라져도
+    (물체축 RPY → extrinsic) 경로로 다시 풀면 roi_cloud·펜던트 표기가 같아진다.
+    """
+    return rpy_body_xyz_to_extrinsic(*rpy_extrinsic_to_body_xyz(rpy_deg))
+
+
 def place_rpy_body_delta(
     rpy_deg: tuple[float, float, float] | np.ndarray,
     *,
     axis: str,
     delta_deg: float,
 ) -> tuple[float, float, float]:
-    """Rotate about CAD (object) axes at the object origin, then re-express as base RPY.
+    """물체(CAD) 원점·축 기준 증분 회전 후 베이스 extrinsic RPY.
 
+    R_new = R @ exp(Δ·e_axis). 평행이동은 건드리지 않음(호출측 xyz 고정).
     axis: ``roll``→CAD X, ``pitch``→CAD Y, ``yaw``→CAD Z.
-    Returned numbers are extrinsic XYZ in project base (yaml / pose_to_T).
     """
     import pinocchio as pin
     from motion.robot_kinematics import rpy_deg_to_rotmat, rotmat_to_rpy_deg
@@ -313,7 +324,59 @@ def place_rpy_body_delta(
     w[idx] = np.deg2rad(d)
     R_new = R @ pin.exp3(w)
     out = rotmat_to_rpy_deg(R_new)
-    return float(_wrap_deg(out[0])), float(_wrap_deg(out[1])), float(_wrap_deg(out[2]))
+    return canonicalize_extrinsic_rpy(
+        (_wrap_deg(out[0]), _wrap_deg(out[1]), _wrap_deg(out[2]))
+    )
+
+
+def place_rpy_base_delta(
+    rpy_deg: tuple[float, float, float] | np.ndarray,
+    *,
+    axis: str,
+    delta_deg: float,
+) -> tuple[float, float, float]:
+    """베이스 고정축 증분 회전 후 extrinsic RPY. (물체 원점 유지, R만 변경)
+
+    R_new = exp(Δ·e_axis) @ R. 티칭 슬라이더는 ``place_rpy_body_delta`` 를 쓴다.
+    """
+    import pinocchio as pin
+    from motion.robot_kinematics import rpy_deg_to_rotmat, rotmat_to_rpy_deg
+
+    idx = {"roll": 0, "pitch": 1, "yaw": 2}[axis]
+    d = float(delta_deg)
+    if abs(d) < 1e-12:
+        r = np.asarray(rpy_deg, dtype=float).reshape(3)
+        return canonicalize_extrinsic_rpy(r)
+    R = rpy_deg_to_rotmat(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
+    w = np.zeros(3, dtype=float)
+    w[idx] = np.deg2rad(d)
+    R_new = pin.exp3(w) @ R
+    out = rotmat_to_rpy_deg(R_new)
+    return canonicalize_extrinsic_rpy(
+        (_wrap_deg(out[0]), _wrap_deg(out[1]), _wrap_deg(out[2]))
+    )
+
+
+def place_axis_alignment_text(
+    rpy_deg: tuple[float, float, float] | np.ndarray,
+    *,
+    tol_deg: float = 15.0,
+) -> str:
+    """물체 XYZ 축이 프로젝트 베이스 어느 축에 가까운지 한 줄 요약."""
+    from motion.robot_kinematics import rpy_deg_to_rotmat
+
+    R = rpy_deg_to_rotmat(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
+    names = "XYZ"
+    parts: list[str] = []
+    for i, n in enumerate(names):
+        v = R[:, i]
+        j = int(np.argmax(np.abs(v)))
+        c = float(np.clip(abs(v[j]), 0.0, 1.0))
+        ang = float(np.degrees(np.arccos(c)))
+        sign = "+" if v[j] >= 0 else "-"
+        mark = "" if ang <= tol_deg else f"~{ang:.0f}°"
+        parts.append(f"{n}≈{sign}{names[j]}{mark}")
+    return " ".join(parts)
 
 
 def frames_from_specs(place: PlacePose, grasp: GraspSpec) -> np.ndarray:
@@ -977,18 +1040,19 @@ class TeachGraspGui:
         approach_a0 = _scalar(yaml_root.get("approach_a_mm"), DEFAULT_APPROACH_A_MM)
         drop_xy0 = load_drop_xy_mm(CAD_YAML)
         self._drop_xy = drop_xy0
-        # UI place rpy = CAD-axis body XYZ. _place_rpy_prev = base extrinsic for mesh/yaml.
-        place_rpy_ui = rpy_extrinsic_to_body_xyz(place.rpy_deg)
-        self._place_rpy_prev = tuple(float(x) for x in place.rpy_deg)
+        # place 저장/적용 = 베이스 extrinsic (_place_rpy_prev, canonicalize).
+        # UI 칸·슬라이더 숫자 = 물체축 RPY (Rx@Ry@Rz). 드래그=물체 축 증분.
+        self._place_rpy_prev = canonicalize_extrinsic_rpy(place.rpy_deg)
+        body_rpy = rpy_extrinsic_to_body_xyz(self._place_rpy_prev)
         self._place_slider_cmd = {
-            "roll": float(place_rpy_ui[0]),
-            "pitch": float(place_rpy_ui[1]),
-            "yaw": float(place_rpy_ui[2]),
+            "roll": float(body_rpy[0]),
+            "pitch": float(body_rpy[1]),
+            "yaw": float(body_rpy[2]),
         }
 
         root.title("물체 집기 티칭")
-        root.minsize(520, 720)
-        root.geometry("560x780")
+        root.minsize(520, 1100)
+        root.geometry("560x1200")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         if self._ctrl is not None:
@@ -1001,8 +1065,8 @@ class TeachGraspGui:
             root,
             text=(
                 f"CAD {mesh_path.name}  ·  Meshcat: {meshcat_url or 'printed URL'}\n"
-                f"물체 xyz=베이스 · Rx/Ry/Rz 표시=물체(CAD) 축.\n"
-                f"{robot_hint}"
+                f"xyz = 물체 원점(베이스). RPY는 물체 축 / 베이스 두 가지로 표기.\n"
+                f"슬라이더·위쪽 칸 = 물체 축. 아래 베이스 칸 = yaml과 동일 (붙여넣기용). {robot_hint}"
             ),
             anchor="w",
             justify="left",
@@ -1011,11 +1075,39 @@ class TeachGraspGui:
         body = ctk.CTkFrame(root, fg_color="transparent")
         body.pack(fill="x", padx=10, pady=(0, 0))
 
-        self._section(body, "시뮬 물체 (xyz=베이스 mm · Rx/Ry/Rz=물체축 deg)")
-        self._xyzrpy_block(body, "place", place.xyz_mm, place_rpy_ui)
+        self._section(body, "시뮬 물체 xyz (원점 · 베이스 mm)")
+        for key, label, val in (
+            ("place_x", "x mm", place.xyz_mm[0]),
+            ("place_y", "y mm", place.xyz_mm[1]),
+            ("place_z", "z mm", place.xyz_mm[2]),
+        ):
+            self._xyz_row(body, key, float(val), label)
+
+        self._section(body, "물체 축 Rx/Ry/Rz (Meshcat 빨강/초록/파랑)")
+        for key, label, val in (
+            ("place_roll", "물체 Rx", body_rpy[0]),
+            ("place_pitch", "물체 Ry", body_rpy[1]),
+            ("place_yaw", "물체 Rz", body_rpy[2]),
+        ):
+            self._rpy_row(body, key, float(val), label)
         ctk.CTkLabel(
             body,
-            text="place Rx/Ry/Rz=물체 원점 CAD 축(R=Rx@Ry@Rz). xyz만 로봇 베이스.",
+            text="드래그 = 물체 축 증분 (원점 고정). Rz만 돌리면 물체 Rz 숫자만 바뀌는 건 정상.",
+            text_color="#9ca3af",
+            anchor="w",
+        ).pack(fill="x", padx=8, pady=(0, 2))
+
+        self._section(body, "베이스 Rx/Ry/Rz (yaml place · roi_cloud)")
+        self._place_base_entries: dict[str, object] = {}
+        for axis, label, val in (
+            ("roll", "베이스 Rx", place.rpy_deg[0]),
+            ("pitch", "베이스 Ry", place.rpy_deg[1]),
+            ("yaw", "베이스 Rz", place.rpy_deg[2]),
+        ):
+            self._place_base_rpy_row(body, axis, float(val), label)
+        ctk.CTkLabel(
+            body,
+            text="칸 입력 = 베이스 절대값 (저장/적용과 동일). 물체 축 칸과 항상 동기화.",
             text_color="#9ca3af",
             anchor="w",
         ).pack(fill="x", padx=8, pady=(0, 2))
@@ -1364,28 +1456,118 @@ class TeachGraspGui:
             self._rpy_sync = False
         self._schedule_live_apply()
 
-    def _nudge_place_rpy(self, axis: str, new_axis_val: float) -> None:
-        """Set one CAD-axis body-XYZ angle; rebuild base extrinsic for mesh/yaml."""
-        self._place_slider_cmd[axis] = float(new_axis_val)
-        self._place_rpy_prev = rpy_body_xyz_to_extrinsic(
-            self._place_slider_cmd["roll"],
-            self._place_slider_cmd["pitch"],
-            self._place_slider_cmd["yaw"],
+    def _place_base_rpy_row(self, parent, axis: str, value: float, label: str) -> None:
+        import customtkinter as ctk
+
+        row = ctk.CTkFrame(parent)
+        row.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
+        ent = ctk.CTkEntry(row, width=90)
+        ent.insert(0, f"{value:.1f}")
+        ent.pack(side="left", padx=6)
+        self._place_base_entries[axis] = ent
+        ent.bind("<FocusOut>", lambda _e, a=axis: self._on_place_base_entry(a))
+        ent.bind("<Return>", lambda _e, a=axis: self._on_place_base_entry(a))
+
+    def _sync_place_base_rpy_ui(self) -> None:
+        """베이스 RPY 칸 ← _place_rpy_prev."""
+        if not getattr(self, "_place_base_entries", None):
+            return
+        vals = {
+            "roll": float(self._place_rpy_prev[0]),
+            "pitch": float(self._place_rpy_prev[1]),
+            "yaw": float(self._place_rpy_prev[2]),
+        }
+        self._rpy_sync = True
+        try:
+            for axis, val in vals.items():
+                ent = self._place_base_entries.get(axis)
+                if ent is None:
+                    continue
+                ent.delete(0, "end")
+                ent.insert(0, f"{val:.1f}")
+        finally:
+            self._rpy_sync = False
+
+    def _on_place_base_entry(self, axis: str) -> None:
+        """베이스 칸 절대 입력 → extrinsic 저장 후 물체 축 UI 동기화."""
+        if self._rpy_sync or axis not in self._place_base_entries:
+            return
+        try:
+            val = float(self._place_base_entries[axis].get().strip())
+        except ValueError:
+            return
+        val = float(np.clip(val, RPY_SLIDER_MIN, RPY_SLIDER_MAX))
+        idx = {"roll": 0, "pitch": 1, "yaw": 2}[axis]
+        cur = list(self._place_rpy_prev)
+        cur[idx] = val
+        self._place_rpy_prev = canonicalize_extrinsic_rpy(
+            (float(cur[0]), float(cur[1]), float(cur[2]))
         )
+        self._sync_place_rpy_ui()
+        self._schedule_live_apply()
+
+    def _sync_place_rpy_ui(self, *, keep_axis: str | None = None) -> None:
+        """물체축 칸·슬라이더 + 베이스 칸 동기화. 드래그 축은 재분해로 덮지 않음."""
+        br, bp, by = rpy_extrinsic_to_body_xyz(self._place_rpy_prev)
+        extracted = {"roll": float(br), "pitch": float(bp), "yaw": float(by)}
+        self._rpy_sync = True
+        try:
+            for axis, val in extracted.items():
+                key = f"place_{axis}"
+                if key in self.entries:
+                    self.entries[key].delete(0, "end")
+                    self.entries[key].insert(0, f"{val:.1f}")
+                if axis == keep_axis:
+                    continue
+                self._place_slider_cmd[axis] = val
+                if key in self.sliders:
+                    lo, hi = self._slider_limits(key)
+                    self.sliders[key].set(float(np.clip(val, lo, hi)))
+        finally:
+            self._rpy_sync = False
+        self._sync_place_base_rpy_ui()
+
+    def _nudge_place_rpy(
+        self, axis: str, new_axis_val: float, *, absolute: bool = False
+    ) -> None:
+        """Rx/Ry/Rz 조작. xyz(물체 원점)는 절대 건드리지 않는다.
+
+        UI 숫자는 물체축 RPY. 내부·yaml 적용은 베이스 extrinsic.
+        슬라이더: 물체 축 증분 R_new = R @ exp(Δ·e_axis).
+        엔트리: 물체축 절대값 → extrinsic 변환.
+        """
+        axis = {"roll": "roll", "pitch": "pitch", "yaw": "yaw"}[axis]
+        new_axis_val = float(new_axis_val)
+        if absolute:
+            cmd = dict(self._place_slider_cmd)
+            cmd[axis] = new_axis_val
+            self._place_rpy_prev = rpy_body_xyz_to_extrinsic(
+                float(cmd["roll"]), float(cmd["pitch"]), float(cmd["yaw"])
+            )
+            self._place_slider_cmd = cmd
+            self._sync_place_rpy_ui()
+        else:
+            old = float(self._place_slider_cmd[axis])
+            delta = new_axis_val - old
+            if delta > 180.0:
+                delta -= 360.0
+            elif delta < -180.0:
+                delta += 360.0
+            self._place_rpy_prev = place_rpy_body_delta(
+                self._place_rpy_prev, axis=axis, delta_deg=delta
+            )
+            self._place_slider_cmd[axis] = new_axis_val
+            self._sync_place_rpy_ui(keep_axis=axis)
         self._schedule_live_apply()
 
     def _on_rpy_slider(self, key: str, value: float) -> None:
         if self._rpy_sync:
             return
         if key.startswith("place_"):
-            self._rpy_sync = True
-            try:
-                ent = self.entries[key]
-                ent.delete(0, "end")
-                ent.insert(0, f"{float(value):.1f}")
-            finally:
-                self._rpy_sync = False
-            self._nudge_place_rpy(key.removeprefix("place_"), float(value))
+            self._nudge_place_rpy(
+                key.removeprefix("place_"), float(value), absolute=False
+            )
             return
         self._rpy_sync = True
         try:
@@ -1405,15 +1587,9 @@ class TeachGraspGui:
             return
         val = float(np.clip(val, RPY_SLIDER_MIN, RPY_SLIDER_MAX))
         if key.startswith("place_"):
-            axis = key.removeprefix("place_")
-            self._nudge_place_rpy(axis, val)
-            self._rpy_sync = True
-            try:
-                self.sliders[key].set(val)
-                self.entries[key].delete(0, "end")
-                self.entries[key].insert(0, f"{val:.1f}")
-            finally:
-                self._rpy_sync = False
+            self._nudge_place_rpy(
+                key.removeprefix("place_"), val, absolute=True
+            )
             return
         self._rpy_sync = True
         try:
@@ -1475,24 +1651,25 @@ class TeachGraspGui:
                 self._rpy_sync = False
 
     def _fill_place(self, place: PlacePose) -> None:
-        # Mesh/yaml = base extrinsic. Pendant shows CAD-axis body XYZ of that pose.
-        self._place_rpy_prev = tuple(float(x) for x in place.rpy_deg)
-        body = rpy_extrinsic_to_body_xyz(place.rpy_deg)
+        # 내부=베이스 extrinsic(정규화), 위 UI=물체축, 아래 UI=베이스.
+        self._place_rpy_prev = canonicalize_extrinsic_rpy(place.rpy_deg)
+        body_rpy = rpy_extrinsic_to_body_xyz(self._place_rpy_prev)
         self._place_slider_cmd = {
-            "roll": float(body[0]),
-            "pitch": float(body[1]),
-            "yaw": float(body[2]),
+            "roll": float(body_rpy[0]),
+            "pitch": float(body_rpy[1]),
+            "yaw": float(body_rpy[2]),
         }
         mapping = {
             "place_x": place.xyz_mm[0],
             "place_y": place.xyz_mm[1],
             "place_z": place.xyz_mm[2],
-            "place_roll": body[0],
-            "place_pitch": body[1],
-            "place_yaw": body[2],
+            "place_roll": body_rpy[0],
+            "place_pitch": body_rpy[1],
+            "place_yaw": body_rpy[2],
         }
         for key, val in mapping.items():
             self._set_entry(key, val)
+        self._sync_place_base_rpy_ui()
 
     def _fill_grasp(self, grasp: GraspSpec) -> None:
         self._grasp_spec = grasp
@@ -1503,7 +1680,7 @@ class TeachGraspGui:
         T_table[2, 3] = -table_t / 2.0
         self._viz.set_overlay_box(
             "table",
-            (0.45, 0.45, table_t),
+            (0.80, 0.80, table_t),
             T_table,
             color=0x2F2F35,
             opacity=0.45,
@@ -1618,8 +1795,9 @@ class TeachGraspGui:
 
         if self._cad_loaded:
             self._viz.set_overlay_transform("cad", T_cad)
-        self._viz.set_overlay_axes("cad_axes", T_cad, scale=0.03)
-        self._viz.set_overlay_axes("pregrasp", T_p, scale=0.035)
+        self._viz.set_overlay_axes("cad_axes", T_cad, scale=0.02, labels=False)
+        self._viz.clear_overlay("base_at_obj")
+        self._viz.set_overlay_axes("pregrasp", T_p, scale=0.02)
         # Virtual N axis (x=z, y=0) only while that approach is selected.
         if auto.axis_name == "N":
             n_world = T_cad[:3, :3] @ N_CAD
@@ -1641,7 +1819,7 @@ class TeachGraspGui:
         if self._grasp_section_hidden():
             self._hide_grasp_overlays()
         else:
-            self._viz.set_overlay_axes("grasp", T_g, scale=0.05)
+            self._viz.set_overlay_axes("grasp", T_g, scale=0.0225)
             self._viz.set_overlay_segment("approach", T_p[:3, 3], T_g[:3, 3])
             self._viz.set_overlay_spheres(
                 "grasp_marker",
@@ -1653,10 +1831,11 @@ class TeachGraspGui:
             self._show_robot(grasp.gripper)
         flip_txt = "pitch−" if auto.pitch_flipped else "pitch+"
         form_txt = f" {auto.form}" if auto.form else ""
+        align = place_axis_alignment_text(place.rpy_deg)
         self._set_status(
-            f"적용  CAD xyz={list(np.round(place.xyz_mm, 1))}  "
-            f"axis={auto.axis_name}{form_txt} {flip_txt}  d={d_mm:.1f} a={a_mm:.1f}  "
-            f"gripper={grasp.gripper:.1f}"
+            f"적용  xyz={list(np.round(place.xyz_mm, 1))}  "
+            f"축(베이스) {align}  "
+            f"axis={auto.axis_name}{form_txt} {flip_txt}  d={d_mm:.1f} a={a_mm:.1f}"
         )
 
     def _set_collision_warn(self, text: str) -> None:
@@ -1879,7 +2058,7 @@ def attach_teach_window(
     *,
     meshcat_url: str,
     controller=None,
-    geometry: str = "500x880+1000+40",
+    geometry: str = "560x1200+1000+40",
 ) -> TeachGraspGui | None:
     """펜던트와 같은 Meshcat에 teach 창을 붙인다. 팔 display(q) 는 펜던트가 담당."""
     import customtkinter as ctk
@@ -1893,6 +2072,7 @@ def attach_teach_window(
     place, grasp = load_specs(CAD_YAML)
     win = ctk.CTkToplevel(parent)
     win.geometry(geometry)
+    win.minsize(520, 1100)
     gui = TeachGraspGui(
         win,
         visualizer=visualizer,

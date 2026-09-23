@@ -41,6 +41,9 @@ TCP_TRAIL_COLOR = 0xFB923C
 
 # RGB matching meshcat.geometry.triad (X red, Y green, Z blue).
 _AXIS_COLORS = (0xE53935, 0x43A047, 0x1E88E8)
+# Cylinder axes (Three.js Cylinder = +Y). Thickness in meters.
+_AXIS_RADIUS_M = 0.0018
+_AXIS_RADIUS_BASE_M = 0.0022
 
 # Unit-box stroke glyphs in XY (normalized ±0.5). Scaled later.
 _GLYPHS: dict[str, tuple[tuple[float, float, float, float], ...]] = {
@@ -85,6 +88,21 @@ def _glyph_points(letter: str, *, size: float) -> np.ndarray:
         pts.append([x0 * s, y0 * s, 0.0])
         pts.append([x1 * s, y1 * s, 0.0])
     return np.asarray(pts, dtype=np.float32).T
+
+
+def _cylinder_axis_T(axis: int, length: float) -> np.ndarray:
+    """Three.js CylinderGeometry is along +Y, centered. Map to +X/+Y/+Z from origin."""
+    L = float(length)
+    T = np.eye(4)
+    if axis == 0:  # +Y → +X : Rz(-90°), shift +X by L/2
+        T[:3, :3] = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        T[0, 3] = L / 2.0
+    elif axis == 1:  # already +Y
+        T[1, 3] = L / 2.0
+    else:  # +Y → +Z : Rx(+90°), shift +Z by L/2
+        T[:3, :3] = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+        T[2, 3] = L / 2.0
+    return T
 
 
 def _axis_label_transform(axis: int, scale: float, letter_size: float) -> np.ndarray:
@@ -182,12 +200,14 @@ class Visualizer:
         self._viz.displayCollisions(False)
         self._viz.displayVisuals(True)
         # TCP axes (body-fixed on L6 / wrist_roll, not the moving jaw).
-        self._viz.displayFrames(True, frame_ids=[kinematics.ee_frame_id], axis_length=0.05)
+        self._viz.displayFrames(True, frame_ids=[kinematics.ee_frame_id], axis_length=0.06)
         self._set_initial_camera()
         self._align_floor_axes()
         self._mark_origin()
-        # Project-base triad (same +X-forward frame as /Axes).
-        self.set_overlay_axes("base", T_urdf_from_user_matrix(), scale=0.06)
+        # Project-base triad (thick cylinders; Meshcat 기본 /Axes 는 숨김).
+        self.set_overlay_axes(
+            "base", T_urdf_from_user_matrix(), scale=0.18, radius_m=_AXIS_RADIUS_BASE_M
+        )
         self._tcp_trail: deque[tuple[float, np.ndarray]] = deque()
         self._trail_last: np.ndarray | None = None
         self._tcp_trail_on = True
@@ -207,8 +227,26 @@ class Visualizer:
         vis["/Cameras/default/rotated/<object>"].set_property("position", list(CAM_POSITION))
 
     def _align_floor_axes(self) -> None:
-        """Meshcat `/Axes` defaults to URDF world — rotate to project base (+X forward)."""
-        self._viz.viewer["/Axes"].set_transform(T_urdf_from_user_matrix())
+        """Meshcat 기본 얇은 `/Axes` 제거·숨김 (두꺼운 overlay base 만 사용)."""
+        self._hide_default_axes()
+
+    def _hide_default_axes(self) -> None:
+        vis = self._viz.viewer
+        for path in ("/Axes", "/axes", "Axes"):
+            try:
+                vis[path].delete()
+            except Exception:
+                pass
+            try:
+                vis[path].set_property("visible", False)
+            except Exception:
+                pass
+        # 재생성돼도 안 보이게 빈 객체
+        try:
+            vis["/Axes"].set_object(g.triad(0.0))
+            vis["/Axes"].set_property("visible", False)
+        except Exception:
+            pass
 
     def _overlay(self, name: str):
         return self._viz.viewer[OVERLAY_ROOT][name]
@@ -261,13 +299,25 @@ class Visualizer:
         scale: float = 0.04,
         labels: bool = False,
         tag: str | None = None,
+        radius_m: float | None = None,
     ) -> None:
-        """RGB triad. labels → tip X/Y/Z (off by default). tag → cyan frame letter."""
+        """RGB triad as thick cylinders. labels → tip X/Y/Z (off by default)."""
         root = self._overlay(name)
         root.set_transform(np.asarray(T, dtype=float))
-        root["axes"].set_object(g.triad(float(scale)))
-        for child in ("label_X", "label_Y", "label_Z", "tag"):
-            root[child].delete()
+        for child in ("axes", "ax_X", "ax_Y", "ax_Z", "label_X", "label_Y", "label_Z", "tag"):
+            try:
+                root[child].delete()
+            except Exception:
+                pass
+        rad = float(_AXIS_RADIUS_M if radius_m is None else radius_m)
+        length = float(scale)
+        for axis, letter, color in zip((0, 1, 2), ("X", "Y", "Z"), _AXIS_COLORS, strict=True):
+            node = root[f"ax_{letter}"]
+            node.set_object(
+                g.Cylinder(length, rad),
+                g.MeshLambertMaterial(color=int(color), reflectivity=0.15),
+            )
+            node.set_transform(_cylinder_axis_T(axis, length))
         if labels:
             letter_size = max(0.008, 0.28 * float(scale))
             for axis, letter, color in zip((0, 1, 2), ("X", "Y", "Z"), _AXIS_COLORS, strict=True):
@@ -421,6 +471,7 @@ class Visualizer:
 
     def display(self, q: np.ndarray) -> None:
         self._viz.display(q)
+        self._hide_default_axes()
         self._update_tcp_trail(q)
 
     @property

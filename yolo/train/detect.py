@@ -72,32 +72,16 @@ def main() -> None:
                 f"{hint} 를 먼저 하거나, GPU 확인만 하면 --pretrained"
             )
 
-    cap = open_camera()
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    preview = grab_bgr(cap)
-    if preview is None:
-        cap.release()
-        raise SystemExit("프레임을 읽을 수 없습니다.")
-    vis0 = preview.copy()
-    cv2.putText(
-        vis0,
-        "loading YOLO...",
-        (8, 32),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (0, 255, 0),
-        2,
-        cv2.LINE_AA,
-    )
-    cv2.imshow(WIN, vis0)
-    cv2.waitKey(1)
-    print(f"창 '{WIN}' 을 띄웠습니다. 모델 로드 중...")
-
+    # 카메라 연 채로 YOLO 로드하면 프레임 큐가 넘쳐 OpenNI USB 가 끊긴다.
+    print("YOLO 로드 중...")
     from ultralytics import YOLO
 
     device = _device()
     model = YOLO(str(weights))
     print(f"class={class_name}  device={device}  conf={args.conf}  q=종료")
+
+    cap = open_camera()
+    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     try:
         while True:
             frame = grab_bgr(cap)

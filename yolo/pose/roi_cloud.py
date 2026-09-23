@@ -66,6 +66,91 @@ def _work_desk_plane(plane, T_bc) -> np.ndarray | None:
     return None
 
 
+def _pose_mm_to_T(xyz_mm, rpy_deg) -> np.ndarray:
+    from motion.robot_kinematics import rpy_deg_to_rotmat
+
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = rpy_deg_to_rotmat(
+        float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2])
+    )
+    T[:3, 3] = np.asarray(xyz_mm, dtype=np.float64).reshape(3)
+    return T
+
+
+def _load_grasp_cad() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """model.yaml `grasp` → T_cad_grasp(mm), xyz, rpy. 티칭 물체 기준 좌표계."""
+    import ast
+
+    from yolo.config import CAD_YAML
+
+    xyz = np.zeros(3, dtype=np.float64)
+    rpy = np.zeros(3, dtype=np.float64)
+    if CAD_YAML.is_file():
+        section = None
+        for raw in CAD_YAML.read_text(encoding="utf-8").splitlines():
+            if "#" in raw:
+                raw = raw.split("#", 1)[0]
+            if not raw.strip():
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            line = raw.strip()
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key, value = key.strip(), value.strip()
+            if indent == 0:
+                section = key if value == "" else None
+                continue
+            if section != "grasp" or not value:
+                continue
+            parsed = np.asarray(ast.literal_eval(value), dtype=np.float64).reshape(-1)
+            if key == "xyz_mm" and parsed.size >= 3:
+                xyz = parsed[:3].copy()
+            elif key == "rpy_deg" and parsed.size >= 3:
+                rpy = parsed[:3].copy()
+    return _pose_mm_to_T(xyz, rpy), xyz, rpy
+
+
+def _tcp_from_cad(T_work_cad: np.ndarray, T_cad_grasp: np.ndarray):
+    """T_work_grasp = T_work_cad @ T_cad_grasp → xyz mm, rpy deg."""
+    from yolo.pose.register import T_to_xyzrpy
+
+    Tg = np.asarray(T_cad_grasp, dtype=np.float64).reshape(4, 4)
+    Tw = np.asarray(T_work_cad, dtype=np.float64).reshape(4, 4)
+    if np.allclose(Tg, np.eye(4), atol=1e-9):
+        return T_to_xyzrpy(Tw)
+    return T_to_xyzrpy(Tw @ Tg)
+
+
+def _xyz_in_cad(T_work_cad: np.ndarray, xyz_work: np.ndarray) -> np.ndarray:
+    """작업 프레임 점 → 물체(CAD) 기준 좌표."""
+    T_cw = invert_T(np.asarray(T_work_cad, dtype=np.float64).reshape(4, 4))
+    p = np.asarray(xyz_work, dtype=np.float64).reshape(3)
+    return T_cw[:3, :3] @ p + T_cw[:3, 3]
+
+
+def _place_ui_xyzrpy(T_work_cad: np.ndarray):
+    """펜던트 place UI용: xyz + 베이스 RPY + 물체축 RPY.
+
+    베이스 숫자는 물체축→extrinsic 으로 고정(canonicalize)해서
+    펜던트에 물체 RPY를 넣었을 때와 같은 베이스 칸 값이 나오게 한다.
+    """
+    from pendant.teach_grasp import (
+        canonicalize_extrinsic_rpy,
+        rpy_extrinsic_to_body_xyz,
+    )
+    from yolo.pose.register import T_to_xyzrpy
+
+    xyz, rpy_raw = T_to_xyzrpy(np.asarray(T_work_cad, dtype=np.float64).reshape(4, 4))
+    rpy_base = canonicalize_extrinsic_rpy(rpy_raw)
+    rpy_body = rpy_extrinsic_to_body_xyz(rpy_base)
+    return (
+        np.asarray(xyz, dtype=float).reshape(3),
+        np.asarray(rpy_base, dtype=float).reshape(3),
+        np.asarray(rpy_body, dtype=float).reshape(3),
+    )
+
+
 def _project_cam(xyz: np.ndarray, K: np.ndarray) -> tuple[int, int] | None:
     z = float(xyz[2])
     if z < 20.0:
@@ -73,29 +158,6 @@ def _project_cam(xyz: np.ndarray, K: np.ndarray) -> tuple[int, int] | None:
     u = float(K[0, 0]) * float(xyz[0]) / z + float(K[0, 2])
     v = float(K[1, 1]) * float(xyz[1]) / z + float(K[1, 2])
     return int(round(u)), int(round(v))
-
-
-def _draw_roi_outline(img: np.ndarray, roi: np.ndarray, color, thick: int = 1) -> bool:
-    """ROI 마스크 윤곽. 뎁스 톱니는 닫고 폴리곤만 남긴다. 점군은 안 바꿈."""
-    mask = np.ascontiguousarray(roi.astype(np.uint8))
-    if not np.any(mask):
-        return False
-    k = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return False
-    simplified = []
-    for cnt in contours:
-        if cv2.contourArea(cnt) < 8:
-            continue
-        eps = max(2.0, 0.02 * cv2.arcLength(cnt, True))
-        approx = cv2.approxPolyDP(cnt, eps, True)
-        simplified.append(approx if len(approx) >= 3 else cnt)
-    if not simplified:
-        return False
-    cv2.drawContours(img, simplified, -1, color, thick, cv2.LINE_AA)
-    return True
 
 
 def _draw_cad_axes(
@@ -144,6 +206,10 @@ class _CadWorker:
         flip: bool,
         tries: int,
         camera_origin: np.ndarray | None = None,
+        T_cad_grasp: np.ndarray | None = None,
+        grasp_xyz_mm: np.ndarray | None = None,
+        grasp_rpy_deg: np.ndarray | None = None,
+        frame_name: str = "camera_mm",
     ):
         from yolo.pose.register import load_cad_xyz, register_pose
 
@@ -156,6 +222,22 @@ class _CadWorker:
             if camera_origin is None
             else np.asarray(camera_origin, dtype=np.float64).reshape(3)
         )
+        self.T_cad_grasp = (
+            np.eye(4, dtype=np.float64)
+            if T_cad_grasp is None
+            else np.asarray(T_cad_grasp, dtype=np.float64).reshape(4, 4)
+        )
+        self.grasp_xyz_mm = (
+            np.zeros(3, dtype=np.float64)
+            if grasp_xyz_mm is None
+            else np.asarray(grasp_xyz_mm, dtype=np.float64).reshape(3)
+        )
+        self.grasp_rpy_deg = (
+            np.zeros(3, dtype=np.float64)
+            if grasp_rpy_deg is None
+            else np.asarray(grasp_rpy_deg, dtype=np.float64).reshape(3)
+        )
+        self.frame_name = frame_name
         self._lock = threading.Lock()
         self._job: np.ndarray | None = None
         self._T_init: np.ndarray | None = None
@@ -232,12 +314,32 @@ class _CadWorker:
                 kind = "추적" if str(pose.get("source", "")).endswith("track") else "등록"
                 ok = "ok" if pose.get("aligned_ok") else "miss"
                 print(
-                    f"CAD {kind} {ok} xyz=[{xyz_mm[0]:.1f}, {xyz_mm[1]:.1f}, {xyz_mm[2]:.1f}]  "
-                    f"rpy=[{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}]  "
+                    f"CAD {kind} {ok} {self.frame_name} "
+                    f"xyz=[{xyz_mm[0]:.1f}, {xyz_mm[1]:.1f}, {xyz_mm[2]:.1f}]  "
+                    f"rpy_ext=[{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}]  "
                     f"on={pose.get('scene_frac', 0):.2f} "
                     f"vis={pose.get('vis_frac', 0):.2f} "
                     f"iou={pose.get('xy_iou', 0):.2f}"
                 )
+                g = self.grasp_xyz_mm
+                gr = self.grasp_rpy_deg
+                print(
+                    f"  grasp(티칭/물체축) xyz=[{g[0]:.1f}, {g[1]:.1f}, {g[2]:.1f}]  "
+                    f"rpy=[{gr[0]:.1f}, {gr[1]:.1f}, {gr[2]:.1f}]"
+                )
+                if pose.get("aligned_ok", False):
+                    p_xyz, p_base, p_body = _place_ui_xyzrpy(pose["T"])
+                    print(
+                        f"  물체 x 축: {p_xyz[0]:.1f} (mm),  y 축: {p_xyz[1]:.1f} (mm),  "
+                        f"z 축: {p_xyz[2]:.1f} (mm)"
+                    )
+                    print(
+                        f"  물체 Rx: {p_body[0]:.1f} ,  Ry: {p_body[1]:.1f} ,  Rz: {p_body[2]:.1f}"
+                    )
+                    print(
+                        f"  베이스 기준 Rx: {p_base[0]:.1f} ,  Ry: {p_base[1]:.1f} ,  "
+                        f"Rz: {p_base[2]:.1f}"
+                    )
             elif err:
                 print(f"CAD 등록 실패: {err}")
 
@@ -398,25 +500,14 @@ def main() -> None:
     noise_max_size = (
         args.noise_max_size if args.noise_max_size is not None else NOISE_MAX_SIZE_DEFAULT
     )
-    cam = open_orbbec(
-        noise_filter=not args.no_noise_filter,
-        noise_min_diff=noise_min_diff,
-        noise_max_size=noise_max_size,
-        hole_filter=True,
-    )
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    filters = OrbbecFilterPanel(
-        cam,
-        noise_on=not args.no_noise_filter,
-        min_diff=noise_min_diff,
-        max_size=noise_max_size,
-    )
 
-    print("Orbbec SDK + YOLO 로드 중...")
+    # 카메라보다 먼저 로드. 스트림 중 긴 로드는 OpenNI 큐 폭주·USB 단절을 부른다.
+    print("YOLO 로드 중...")
     from ultralytics import YOLO
 
     device = _device()
     model = YOLO(str(weights))
+
     keys = "v=3D  s=save  r=plane  q=quit"
     if args.cad:
         keys = "c=등록  " + keys
@@ -433,11 +524,20 @@ def main() -> None:
     last_cad_anchor = None
     if args.cad:
         print("CAD 로드 중...")
+        T_cad_grasp, grasp_xyz_mm, grasp_rpy_deg = _load_grasp_cad()
+        print(
+            f"obj(티칭) xyz=[{grasp_xyz_mm[0]:.1f}, {grasp_xyz_mm[1]:.1f}, {grasp_xyz_mm[2]:.1f}]  "
+            f"rpy=[{grasp_rpy_deg[0]:.1f}, {grasp_rpy_deg[1]:.1f}, {grasp_rpy_deg[2]:.1f}]"
+        )
         cad_worker = _CadWorker(
             voxel_mm=args.voxel_mm,
             flip=bool(args.base),
             tries=4,
             camera_origin=None if T_bc is None else T_bc[:3, 3],
+            T_cad_grasp=T_cad_grasp,
+            grasp_xyz_mm=grasp_xyz_mm,
+            grasp_rpy_deg=grasp_rpy_deg,
+            frame_name=frame_name,
         )
         print(
             "CAD: 첫 등록 후 정지하면 축 고정. "
@@ -447,9 +547,28 @@ def main() -> None:
             f"밀도  stride={args.stride}  등록={args.voxel_mm:g}mm  "
             f"표시={args.overlay_voxel_mm:g}mm"
         )
+    else:
+        T_cad_grasp = np.eye(4, dtype=np.float64)
+        grasp_xyz_mm = np.zeros(3, dtype=np.float64)
+        grasp_rpy_deg = np.zeros(3, dtype=np.float64)
+
+    cam = open_orbbec(
+        noise_filter=not args.no_noise_filter,
+        noise_min_diff=noise_min_diff,
+        noise_max_size=noise_max_size,
+        hole_filter=True,
+    )
+    cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
+    filters = OrbbecFilterPanel(
+        cam,
+        noise_on=not args.no_noise_filter,
+        min_diff=noise_min_diff,
+        max_size=noise_max_size,
+    )
 
     try:
         while True:
+            cam.flush()
             bgr, depth = cam.grab(timeout_ms=800)
             if bgr is None or depth is None:
                 vis = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -566,7 +685,6 @@ def main() -> None:
                     tint = np.zeros_like(bgr)
                     tint[inst.roi] = color
                     cv2.addWeighted(tint, 0.35, bgr, 1.0, 0.0, dst=bgr)
-                    _draw_roi_outline(bgr, inst.roi, color, 1)
                     ys, xs = np.nonzero(inst.roi)
                     if len(xs):
                         tag_x = int(xs.min())
@@ -574,12 +692,6 @@ def main() -> None:
                     else:
                         tag_x, tag_y = x1, max(16, y1 - 6)
                 else:
-                    thick = 1
-                    drawn = _draw_roi_outline(bgr, inst.roi, color, thick)
-                    _draw_roi_outline(depth_vis, inst.roi, color, thick)
-                    if not drawn:
-                        cv2.rectangle(bgr, (x1, y1), (x2, y2), color, thick)
-                        cv2.rectangle(depth_vis, (x1, y1), (x2, y2), color, thick)
                     tag_x, tag_y = x1, max(16, y1 - 6)
                 tag = f"{len(inst.xyz)} pts zok={inst.n_zok}"
                 if i == chosen and last_pose is not None:
@@ -625,40 +737,77 @@ def main() -> None:
                 cv2.LINE_AA,
             )
             if args.cad:
+                place_font = 0.58
+                place_thick = 2
                 if cad_pose is not None:
-                    cxyz = cad_pose["xyz_mm"]
-                    crpy = cad_pose["rpy_deg"]
                     on = cad_pose.get("scene_frac")
                     vis = cad_pose.get("vis_frac")
                     iou = cad_pose.get("xy_iou")
                     ok = cad_pose.get("aligned_ok", False)
-                    extra = ""
-                    if on is not None:
-                        extra += f"  on={on:.2f}"
-                    if vis is not None:
-                        extra += f" vis={vis:.2f}"
-                    if iou is not None:
-                        extra += f" iou={iou:.2f}"
-                    if not ok:
-                        extra += "  MISS"
+                    p_xyz, p_base, p_body = _place_ui_xyzrpy(cad_pose["T"])
+                    xyz_line = (
+                        f"물체 x 축: {p_xyz[0]:.1f} (mm),  y 축: {p_xyz[1]:.1f} (mm),  "
+                        f"z 축: {p_xyz[2]:.1f} (mm)"
+                    )
+                    body_line = (
+                        f"물체 Rx: {p_body[0]:.1f} ,  Ry: {p_body[1]:.1f} ,  "
+                        f"Rz: {p_body[2]:.1f}"
+                    )
+                    base_line = (
+                        f"베이스 기준 Rx: {p_base[0]:.1f} ,  Ry: {p_base[1]:.1f} ,  "
+                        f"Rz: {p_base[2]:.1f}"
+                    )
                     cad_line = (
-                        f"CAD xyz={cxyz[0]:.0f},{cxyz[1]:.0f},{cxyz[2]:.0f}  "
-                        f"rpy={crpy[0]:.1f},{crpy[1]:.1f},{crpy[2]:.1f}{extra}"
+                        f"CAD/{frame_name} on={on:.2f}" if on is not None else f"CAD/{frame_name}"
+                    )
+                    if vis is not None:
+                        cad_line += f" vis={vis:.2f}"
+                    if iou is not None:
+                        cad_line += f" iou={iou:.2f}"
+                    if not ok:
+                        cad_line += "  MISS"
+                    obj_line = (
+                        f"grasp(티칭·물체축) xyz={grasp_xyz_mm[0]:.0f},{grasp_xyz_mm[1]:.0f},{grasp_xyz_mm[2]:.0f}  "
+                        f"rpy={grasp_rpy_deg[0]:.1f},{grasp_rpy_deg[1]:.1f},{grasp_rpy_deg[2]:.1f}"
                     )
                 elif cad_worker is not None and cad_worker.busy:
-                    cad_line = "CAD ... 등록 중"
+                    xyz_line = "물체 x/y/z 축: 등록 중 ..."
+                    body_line = "물체 Rx/Ry/Rz: ..."
+                    base_line = "베이스 기준 Rx/Ry/Rz: ..."
+                    cad_line = "CAD ..."
+                    obj_line = (
+                        f"grasp(티칭/물체축) xyz={grasp_xyz_mm[0]:.0f},{grasp_xyz_mm[1]:.0f},{grasp_xyz_mm[2]:.0f}  "
+                        f"rpy={grasp_rpy_deg[0]:.1f},{grasp_rpy_deg[1]:.1f},{grasp_rpy_deg[2]:.1f}"
+                    )
                 else:
-                    cad_line = "CAD 대기 (점군 나오면 시작, c=처음부터)"
-                cv2.putText(
-                    bgr,
-                    cad_line,
-                    (8, 48),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+                    xyz_line = "물체 x/y/z 축: 대기 (점군 나오면 시작)"
+                    body_line = "물체 Rx/Ry/Rz: 대기"
+                    base_line = "베이스 기준 Rx/Ry/Rz: 대기"
+                    cad_line = "CAD 대기"
+                    obj_line = (
+                        f"grasp(티칭/물체축) xyz={grasp_xyz_mm[0]:.0f},{grasp_xyz_mm[1]:.0f},{grasp_xyz_mm[2]:.0f}  "
+                        f"rpy={grasp_rpy_deg[0]:.1f},{grasp_rpy_deg[1]:.1f},{grasp_rpy_deg[2]:.1f}"
+                    )
+                overlay_lines = [
+                    (50, xyz_line, (0, 255, 255)),
+                    (78, body_line, (0, 255, 255)),
+                    (106, base_line, (0, 255, 255)),
+                    (134, cad_line, (180, 180, 80)),
+                    (162, obj_line, (0, 220, 255)),
+                ]
+                for y, text, color in overlay_lines:
+                    if not text:
+                        continue
+                    cv2.putText(
+                        bgr,
+                        text,
+                        (8, y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        place_font,
+                        color,
+                        place_thick,
+                        cv2.LINE_AA,
+                    )
             if cad_pose is not None:
                 T_draw = np.asarray(cad_pose["T"], dtype=np.float64)
                 if T_bc is not None:

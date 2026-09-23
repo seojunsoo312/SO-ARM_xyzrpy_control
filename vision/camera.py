@@ -114,6 +114,8 @@ class OrbbecCapture:
     def read(self):
         if self._filters is not None:
             self._filters.sync()
+        # 느린 YOLO 등으로 쌓인 프레임을 비운 뒤 최신만 쓴다.
+        self._cam.flush()
         bgr, _ = self._cam.grab()
         if bgr is None:
             return False, None

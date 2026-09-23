@@ -1,9 +1,13 @@
 """Orbbec SDK filter / exposure panel (same UI as roi_cloud).
 
 Used by vision.camera.open_camera(filters=True) and yolo/pose/roi_cloud.py.
+마지막 값은 vision/orbbec_filters.json 에 저장·복원된다.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -11,10 +15,45 @@ import numpy as np
 FILTER_WIN = "Orbbec filters"
 NOISE_MIN_DIFF_DEFAULT = 10000
 NOISE_MAX_SIZE_DEFAULT = 1
+FILTER_STATE_PATH = Path(__file__).resolve().parent / "orbbec_filters.json"
+
+_BOOL_KEYS = ("noise", "hole", "holefill", "temporal")
+_OPTIONAL_BOOL_KEYS = ("color_ae", "ae")
+_INT_KEYS = (
+    "min_diff",
+    "max_size",
+    "holefill_mode",
+    "color_exposure",
+    "color_gain",
+    "exposure",
+    "gain",
+)
+_FLOAT_KEYS = ("t_weight", "t_diff")
 
 
 def _clip_int(v: int, lo: int, hi: int) -> int:
     return int(min(hi, max(lo, v)))
+
+
+def _clip_float(v: float, lo: float, hi: float) -> float:
+    return float(min(hi, max(lo, v)))
+
+
+def _load_filter_state(path: Path = FILTER_STATE_PATH) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _save_filter_state(values: dict, path: Path = FILTER_STATE_PATH) -> None:
+    payload = {k: values[k] for k in (*_BOOL_KEYS, *_OPTIONAL_BOOL_KEYS, *_INT_KEYS, *_FLOAT_KEYS)}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"{FILTER_WIN}: 설정 저장 실패 ({exc})")
 
 
 class OrbbecFilterPanel:
@@ -65,6 +104,7 @@ class OrbbecFilterPanel:
             "t_weight": float(tcur["weight"]),
             "t_diff": float(tcur["diffscale"]),
         }
+        restored = self._apply_saved_state()
         self._hits: list[dict] = []
         self._drag: dict | None = None
         self._dirty = True
@@ -76,7 +116,44 @@ class OrbbecFilterPanel:
         cv2.namedWindow(FILTER_WIN, flags)
         cv2.setMouseCallback(FILTER_WIN, self._on_mouse)
         self.sync(force=True)
-        print(f"{FILTER_WIN}: 클릭 ON/OFF, 슬라이더 드래그")
+        if restored:
+            print(f"{FILTER_WIN}: 이전 설정 복원 → {FILTER_STATE_PATH.name}")
+        print(f"{FILTER_WIN}: 클릭 ON/OFF, 슬라이더 드래그 (종료 시 저장)")
+
+    def _apply_saved_state(self) -> bool:
+        saved = _load_filter_state()
+        if not saved:
+            return False
+        v = self.v
+        for key in _BOOL_KEYS:
+            if key in saved and saved[key] is not None:
+                v[key] = bool(saved[key])
+        for key in _OPTIONAL_BOOL_KEYS:
+            if key not in saved:
+                continue
+            if saved[key] is None or v[key] is None:
+                continue
+            v[key] = bool(saved[key])
+        int_ranges = {
+            "min_diff": (self.diff_lo, self.diff_hi),
+            "max_size": (self.size_lo, self.size_hi),
+            "holefill_mode": (0, 2),
+            "color_exposure": (self.cexp_lo, self.cexp_hi),
+            "color_gain": (self.cgain_lo, self.cgain_hi),
+            "exposure": (self.exp_lo, self.exp_hi),
+            "gain": (self.gain_lo, self.gain_hi),
+        }
+        for key, (lo, hi) in int_ranges.items():
+            if key in saved and saved[key] is not None:
+                v[key] = _clip_int(int(saved[key]), lo, hi)
+        float_ranges = {
+            "t_weight": (self.w_lo, self.w_hi),
+            "t_diff": (self.d_lo, self.d_hi),
+        }
+        for key, (lo, hi) in float_ranges.items():
+            if key in saved and saved[key] is not None:
+                v[key] = _clip_float(float(saved[key]), lo, hi)
+        return True
 
     def _layout_height(self) -> int:
         n = 1 + 2  # Noise header + MinDiff/MaxSize
@@ -131,7 +208,13 @@ class OrbbecFilterPanel:
         elif event == cv2.EVENT_MOUSEMOVE and self._drag is not None and (flags & cv2.EVENT_FLAG_LBUTTON):
             self._set_slider(self._drag, x)
         elif event == cv2.EVENT_LBUTTONUP:
+            was_drag = self._drag is not None
             self._drag = None
+            if was_drag:
+                self._persist()
+
+    def _persist(self) -> None:
+        _save_filter_state(self.v)
 
     def _set_slider(self, hit: dict, x: int) -> None:
         key = hit["key"]
@@ -200,6 +283,9 @@ class OrbbecFilterPanel:
             "temporal": temporal,
         }
         self._dirty = False
+        # 드래그 중엔 매 프레임 쓰지 않고, 토글/강제 sync 때만 저장
+        if self._drag is None:
+            self._persist()
         self._draw()
 
     def _draw_toggle(self, img, rect, on: bool | None, enabled: bool = True) -> None:
@@ -303,8 +389,13 @@ class OrbbecFilterPanel:
                 True,
                 names[mode],
             )
-        header("Color", "color_ae" if self.caps["color_ae"] else None, v["color_ae"], "RGB AE")
-        color_on = not bool(v["color_ae"])
+        header(
+            "Color",
+            "color_ae" if self.caps["color_ae"] else None,
+            v["color_ae"],
+            "OFF 후 조절 · 슬라이더 드래그 시 AE 끔",
+        )
+        # AE ON 이어도 히트는 등록한다. 드래그하면 _set_slider 가 AE 를 끈다.
         if self.caps["color_exposure"]:
             slider(
                 "Exposure",
@@ -313,7 +404,7 @@ class OrbbecFilterPanel:
                 self.cexp_lo,
                 self.cexp_hi,
                 "int",
-                color_on,
+                True,
                 "{}",
             )
         if self.caps["color_gain"]:
@@ -324,15 +415,19 @@ class OrbbecFilterPanel:
                 self.cgain_lo,
                 self.cgain_hi,
                 "int",
-                color_on,
+                True,
                 "{}",
             )
-        header("DepthExp", "ae" if self.caps["ae"] else None, v["ae"], "IR")
-        exp_on = not bool(v["ae"])
+        header(
+            "DepthExp",
+            "ae" if self.caps["ae"] else None,
+            v["ae"],
+            "OFF 후 조절 · 슬라이더 드래그 시 AE 끔",
+        )
         if self.caps["exposure"]:
-            slider("Exposure", "exposure", v["exposure"], self.exp_lo, self.exp_hi, "int", exp_on, "{}")
+            slider("Exposure", "exposure", v["exposure"], self.exp_lo, self.exp_hi, "int", True, "{}")
         if self.caps["gain"]:
-            slider("Gain", "gain", v["gain"], self.gain_lo, self.gain_hi, "int", exp_on, "{}")
+            slider("Gain", "gain", v["gain"], self.gain_lo, self.gain_hi, "int", True, "{}")
         if self.caps["temporal"]:
             header("Temporal", "temporal", v["temporal"], "default OFF")
             slider(
@@ -358,6 +453,7 @@ class OrbbecFilterPanel:
         cv2.imshow(FILTER_WIN, img)
 
     def close(self) -> None:
+        self._persist()
         try:
             cv2.destroyWindow(FILTER_WIN)
         except Exception:

@@ -1,0 +1,17 @@
+{
+  "noise": true,
+  "hole": true,
+  "holefill": true,
+  "temporal": false,
+  "color_ae": true,
+  "ae": null,
+  "min_diff": 10000,
+  "max_size": 1,
+  "holefill_mode": 2,
+  "color_exposure": 285,
+  "color_gain": 11,
+  "exposure": 2370,
+  "gain": 1469,
+  "t_weight": 0.5030805695431211,
+  "t_diff": 0.5
+}

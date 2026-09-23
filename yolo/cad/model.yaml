@@ -4,8 +4,9 @@ mesh: bracket_4035.stl
 unit: mm
 class: bracket
 # STL 파일 축 → 프로젝트 CAD 프레임 (deg, XYZ extrinsic).
-# Rx180: 파일 +Z(브라켓 아래) → 프로젝트 +Z(위).
-mesh_rpy: [180, 0, 0]
+# Rx180: 파일 +Z → 프로젝트 +Z(위).
+# Ry-90: Y축 기준 (이전 +90에서 180° 더 돌림).
+mesh_rpy: [180, -90, 0]
 
 # 시뮬 배치 (프로젝트 베이스 mm/deg, +X 전진). pick 변환에는 안 씀.
 place:
