@@ -6,6 +6,7 @@ import atexit
 import html
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,9 @@ PAGE_TITLE = "시뮬레이터"
 # Closer copy of that so the ~0.4 m arm fills the view.
 # Project base axes (overlay): +X forward; see motion/base_frame.py.
 CAM_POSITION = (0.70, 0.32, 0.0)
+# Robot and overlays share the URDF frame, same as main. A view-only yaw
+# here spins the arm away from the mat and the pre-grasp marker.
+ROBOT_VIEW_YAW_RAD = 0.0
 OVERLAY_ROOT = "teach"
 TCP_TRAIL_SEC = 10.0
 TCP_TRAIL_MIN_M = 0.001  # 1 mm
@@ -90,6 +94,14 @@ def _glyph_points(letter: str, *, size: float) -> np.ndarray:
     return np.asarray(pts, dtype=np.float32).T
 
 
+def _robot_view_matrix() -> np.ndarray:
+    """Rz(ROBOT_VIEW_YAW_RAD) about the shared origin."""
+    c, s = float(np.cos(ROBOT_VIEW_YAW_RAD)), float(np.sin(ROBOT_VIEW_YAW_RAD))
+    T = np.eye(4)
+    T[:3, :3] = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return T
+
+
 def _cylinder_axis_T(axis: int, length: float) -> np.ndarray:
     """Three.js CylinderGeometry is along +Y, centered. Map to +X/+Y/+Z from origin."""
     L = float(length)
@@ -136,6 +148,53 @@ def _meshcat_viewer_root(title: str) -> str:
     return str(dst)
 
 
+def _kill_process_group(proc: subprocess.Popen | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.terminate()
+        except Exception:
+            return
+    try:
+        proc.wait(timeout=1.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            return
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _close_browser_window(title: str) -> None:
+    """탭 제목이 title 인 창을 닫는다. 도구가 없으면 넘어간다."""
+    commands = (
+        ["wmctrl", "-c", title],
+        ["xdotool", "search", "--name", title, "windowclose", "%@"],
+    )
+    for cmd in commands:
+        try:
+            subprocess.run(
+                cmd,
+                check=False,
+                timeout=2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+
+
 def _start_meshcat_server(zmq_url=None, server_args=None):
     """Same as meshcat's launcher, but serve our titled index.html."""
     from meshcat.servers.zmqserver import match_web_url, match_zmq_url
@@ -177,8 +236,7 @@ def _start_meshcat_server(zmq_url=None, server_args=None):
     web_url = match_web_url(server_proc.stdout.readline().strip().decode("utf-8"))
 
     def cleanup(proc):
-        proc.kill()
-        proc.wait()
+        _kill_process_group(proc)
 
     atexit.register(cleanup, server_proc)
     return server_proc, zmq_url, web_url
@@ -197,6 +255,7 @@ class Visualizer:
         )
         self._viz.initViewer(open=open_browser)
         self._viz.loadViewerModel(rootNodeName="SO101_6DOF")
+        self._viz.viewer["SO101_6DOF"].set_transform(_robot_view_matrix())
         self._viz.displayCollisions(False)
         self._viz.displayVisuals(True)
         # TCP axes (body-fixed on L6 / wrist_roll, not the moving jaw).
@@ -473,6 +532,13 @@ class Visualizer:
         self._viz.display(q)
         self._hide_default_axes()
         self._update_tcp_trail(q)
+
+    def close(self) -> None:
+        """Meshcat 서버와 제목이 시뮬레이터인 브라우저 창을 닫는다."""
+        _close_browser_window(PAGE_TITLE)
+        window = getattr(self._viz.viewer, "window", None)
+        proc = getattr(window, "server_proc", None)
+        _kill_process_group(proc)
 
     @property
     def url(self) -> str:

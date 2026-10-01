@@ -13,18 +13,20 @@ import pinocchio as pin
 URDF_JOINT_NAMES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7")
 ARM_JOINT_NAMES = ("S1", "S2", "S3", "S4", "S5", "S6")
 GRIPPER_JOINT = "S7"
-# Fusion S7 q=0 = inner faces parallel (~16 mm pad gap).
-# Tips meet at +11.5°. Opening is negative CAD.
-# Pendant 0 = closed, 100 = fully open.
-GRIPPER_CLOSED_CAD_DEG = 11.5
-GRIPPER_OPEN_CAD_DEG = -120
+# Official SO-101 gripper joint: tips meet at the lower limit, fully open at the upper.
+# Pendant 0 = closed, 100 = fully open. User 0 = pendant 50 (HOME, half-open).
+GRIPPER_CLOSED_CAD_DEG = -10.0
+GRIPPER_OPEN_CAD_DEG = 100.0
 GRIPPER_USER_MID = 50.0  # user deg 0 = bus/pendant 50 (HOME, half-open)
 EE_FRAME = "L6_1"  # gripper body (wrist_roll child); not the moving jaw
 TCP_FRAME = "tcp"
 TCP_PARENT_JOINT = "S6"  # body-fixed; opening S7 must not move TCP
-# Inner-pad midpoint of L6 (fixed jaw) and L7 (moving jaw) in the S6 frame, at HOME.
-# Parent is S6 so opening S7 does not move TCP.
-TCP_OFFSET_IN_L6 = np.array([0.00002, -0.10251, 0.00102])
+# Gripper link (S6). Finger depth is the official SO-101 gripper frame (~98 mm).
+# Official x=-7.9 mm sits on the fixed-jaw inner face. SO-100 TCP was the
+# opening center, 8 mm off that face, so x is 0 here (pads are symmetric ±7.9 mm).
+# Rx(+90°) keeps the old tool axes: +X up, +Y back along the forearm, fingers along -Y.
+TCP_OFFSET_IN_L6 = np.array([0.0, -0.000218121, -0.0981274])
+TCP_RPY_IN_L6_DEG = (90.0, 0.0, 0.0)
 
 # LeRobot names for later hw mapping. Jog-confirmed, chain order = servo ID.
 LEROBOT_FROM_URDF = {
@@ -38,28 +40,29 @@ LEROBOT_FROM_URDF = {
 }
 URDF_FROM_LEROBOT = {v: k for k, v in LEROBOT_FROM_URDF.items()}
 
-# CAD angle at pendant 0°: Onshape/LeRobot L-pose (upper arm up, forearm +X).
-# Fusion URDF q=0 is the stretched CAD assembly along -Y, so these offsets
-# make GUI 0 match that teaching zero (SO-101 screenshot, all joints 0.00).
+# CAD angle at pendant 0°. New URDF q=0 already has the upper arm up and the
+# forearm along +X. S1 +90° turns that forearm onto user-forward (URDF −Y),
+# the same L-pose the SO-100 home uses, so pre-grasp stays over the mat.
 JOINT_ZERO_OFFSET_DEG = {
-    "S1": 0.0,
-    "S2": -90.0,
-    "S3": 90.0,
+    "S1": 90.0,
+    "S2": 0.0,
+    "S3": 0.0,
     "S4": 0.0,
     "S5": 0.0,
-    "S6": 90.0,
+    "S6": 0.0,
     "S7": 0.0,
 }
 
-# Pendant + vs URDF + (CAD axis). -1 flips jog/display without moving HOME.
+# Pendant + vs URDF +. Signs follow the new joint axes so + still moves
+# each link the same way it did on the SO-100 model.
 JOINT_SIGN = {
-    "S1": -1.0,
+    "S1": 1.0,
     "S2": 1.0,
     "S3": 1.0,
-    "S4": -1.0,  # elbow_roll: pendant + vs CAD was inverted
+    "S4": 1.0,
     "S5": 1.0,
-    "S6": -1.0,
-    "S7": -1.0,  # GUI + opens (CAD toward GRIPPER_OPEN_CAD_DEG)
+    "S6": 1.0,
+    "S7": 1.0,  # GUI + opens (CAD toward GRIPPER_OPEN_CAD_DEG)
 }
 
 # Pendant (user) soft limits. Missing key = unbounded (S7 uses gripper CAD span).
@@ -283,7 +286,8 @@ class RobotKinematics:
 
     def _add_tcp_frame(self) -> None:
         jid = self.model.getJointId(TCP_PARENT_JOINT)
-        placement = pin.SE3(np.eye(3), self.tcp_offset)
+        rot = rpy_deg_to_rotmat(*TCP_RPY_IN_L6_DEG)
+        placement = pin.SE3(rot, self.tcp_offset)
         self.model.addFrame(pin.Frame(TCP_FRAME, jid, placement, pin.FrameType.OP_FRAME))
 
     def _init_collision_pairs(self) -> None:

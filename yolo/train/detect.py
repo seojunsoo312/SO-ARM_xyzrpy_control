@@ -5,7 +5,7 @@
   python yolo/train/detect.py --seg
   python yolo/train/detect.py --weights yolo/weights/best.pt --conf 0.35
 
-GPU 설치 확인만 하려면 COCO OBB nano 를 잠깐 쓸 수 있다 (우리 물건은 안 잡힘):
+GPU 설치 확인만 하려면 COCO nano 를 잠깐 쓸 수 있다 (우리 물건은 안 잡힘):
 
   python yolo/train/detect.py --pretrained
 """
@@ -52,7 +52,7 @@ def main() -> None:
     parser.add_argument(
         "--pretrained",
         action="store_true",
-        help="yolo11n-obb COCO 로 GPU/카메라만 확인. 커스텀 물건은 안 잡힘.",
+        help="yolo11n COCO 로 GPU/카메라만 확인. 커스텀 물건은 안 잡힘.",
     )
     add_class_argument(parser)
     args = parser.parse_args()
@@ -101,28 +101,17 @@ def main() -> None:
             obb = getattr(result, "obb", None)
             boxes = result.boxes
             masks = result.masks
-            dets = obb if obb is not None and len(obb) else boxes
+            dets = boxes if boxes is not None and len(boxes) else obb
             if dets is not None:
                 n = len(dets)
                 for i, det in enumerate(dets):
-                    if hasattr(det, "xyxyxyxy") and det.xyxyxyxy is not None:
-                        quad = det.xyxyxyxy[0]
-                        if hasattr(quad, "cpu"):
-                            quad = quad.cpu().numpy()
-                        pts = np.asarray(quad, dtype=np.float32).reshape(-1, 2)
-                        cx = float(pts[:, 0].mean())
-                        cy = float(pts[:, 1].mean())
-                        xyxy = [
-                            float(pts[:, 0].min()),
-                            float(pts[:, 1].min()),
-                            float(pts[:, 0].max()),
-                            float(pts[:, 1].max()),
-                        ]
-                    else:
-                        xyxy = det.xyxy[0].tolist()
-                        cx = (xyxy[0] + xyxy[2]) / 2.0
-                        cy = (xyxy[1] + xyxy[3]) / 2.0
-                    kind = "obb" if obb is not None and len(obb) else "box"
+                    raw = det.xyxy[0]
+                    if hasattr(raw, "cpu"):
+                        raw = raw.cpu().numpy()
+                    xyxy = [float(v) for v in np.asarray(raw).reshape(-1)[:4]]
+                    cx = (xyxy[0] + xyxy[2]) / 2.0
+                    cy = (xyxy[1] + xyxy[3]) / 2.0
+                    kind = "box"
                     if masks is not None and masks.xy is not None and i < len(masks.xy):
                         pts = masks.xy[i]
                         if pts is not None and len(pts) >= 3:

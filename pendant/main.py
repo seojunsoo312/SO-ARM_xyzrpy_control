@@ -13,8 +13,14 @@ for path in (PROJECT, ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from ui_style import apply_ui_theme, enable_xft_tk
+
+enable_xft_tk()
+
 import customtkinter as ctk
 import numpy as np
+
+apply_ui_theme()
 
 from gui_app import PendantGui
 from motion import (
@@ -57,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--grasp",
         action="store_true",
-        help="물체 집기 teach 창을 같은 Meshcat에 연다",
+        help="사물 위치 패널을 조작 가능하게 연다. 없으면 같은 패널이 잠긴다",
     )
     return p.parse_args()
 
@@ -107,13 +113,11 @@ def main() -> None:
 
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
-    PendantGui(root, ctrl, viz, meshcat_url=url)
-    if args.grasp:
-        from teach_grasp import attach_teach_window
-
-        teach = attach_teach_window(root, viz, meshcat_url=url, controller=ctrl)
-        if teach is not None:
-            print("Teach    물체 집기 창 (같은 Meshcat, 대기/집기 위치 이동)")
+    gui = PendantGui(root, ctrl, viz, meshcat_url=url, grasp=args.grasp)
+    if args.grasp and gui.grasp_ready:
+        print("Teach    사물 위치 패널 (같은 창, 같은 Meshcat)")
+    elif not args.grasp:
+        print("Teach    사물 위치 패널 잠김 (--grasp 로 조작)")
     root.mainloop()
 
 

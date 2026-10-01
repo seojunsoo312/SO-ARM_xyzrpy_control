@@ -19,6 +19,7 @@ from motion.base_frame import (
 from motion.hw_controller import Hardware
 from motion.pose_server import POSE_URL, PoseServer
 from motion.robot_kinematics import (
+    ARM_JOINT_NAMES,
     DEG2RAD,
     GRIPPER_CLOSED_CAD_DEG,
     GRIPPER_JOINT,
@@ -36,12 +37,12 @@ FPS = 30
 JOINT_VEL_DEG_S = 45.0  # displayed 100%
 JOINT_VEL_MIN_DEG_S = 8.0  # displayed 10% (former 40% of 20°/s)
 GRIPPER_VEL_UNIT_S = 40.0
-JOG_VEL_MPS = 0.010  # default XYZ jog; GUI slider 5–15 mm/s
+JOG_VEL_MPS = 0.025  # default XYZ jog; GUI slider 5–45 mm/s
 JOG_VEL_MIN_MPS = 0.005
-JOG_VEL_MAX_MPS = 0.015
-JOG_ROT_DEG_S = 20.0
+JOG_VEL_MAX_MPS = 0.045
 JOG_ROT_MIN_DEG_S = 5.0
 JOG_ROT_MAX_DEG_S = 45.0
+JOG_ROT_DEG_S = (JOG_ROT_MIN_DEG_S + JOG_ROT_MAX_DEG_S) / 2.0
 JOG_ROT_RAD_S = JOG_ROT_DEG_S * DEG2RAD
 TORQUE_PCT_MIN = 10.0
 TORQUE_PCT_MAX = 100.0
@@ -103,6 +104,7 @@ class PendantState:
     fault: str
     mode: str
     rot_frame: str
+    xyz_frame: str
     connected: bool
     torque: bool
     ee_err_mm: float | None
@@ -127,6 +129,7 @@ class Controller:
         self._interrupt_id = 0
         self._mode = "virtual"
         self._rot_frame = ROT_FRAME_BASE
+        self._xyz_frame = ROT_FRAME_BASE
         self._q_meas: np.ndarray | None = None
         self._pose_meas: TcpPose | None = None
         self._ee_err_mm: float | None = None
@@ -249,18 +252,32 @@ class Controller:
         except Exception as exc:
             raise RuntimeError(f"torque limit write failed ({exc})") from exc
 
-    def set_rot_frame(self, frame: str) -> None:
-        """RPY jog frame: 'base' (world-fixed) or 'tcp' (tool-local)."""
+    @staticmethod
+    def _normalize_jog_frame(frame: str) -> str:
         key = str(frame).strip().lower()
         if key in {"base", "world"}:
-            key = ROT_FRAME_BASE
-        elif key in {"tcp", "tool", "local"}:
-            key = ROT_FRAME_TCP
-        else:
-            raise ValueError(f"rot frame must be base|tcp, got {frame!r}")
+            return ROT_FRAME_BASE
+        if key in {"tcp", "tool", "local"}:
+            return ROT_FRAME_TCP
+        raise ValueError(f"jog frame must be base|tcp, got {frame!r}")
+
+    def set_rot_frame(self, frame: str) -> None:
+        """RPY jog frame: 'base' (world-fixed) or 'tcp' (tool-local)."""
+        key = self._normalize_jog_frame(frame)
         with self._lock:
             self._rot_frame = key
             self._reset_cart_targets()
+
+    def set_xyz_frame(self, frame: str) -> None:
+        """XYZ jog frame: 'base' (project +X forward) or 'tcp' (tool-local). Go-to stays base."""
+        key = self._normalize_jog_frame(frame)
+        with self._lock:
+            self._xyz_frame = key
+            self._reset_cart_targets()
+
+    def xyz_frame(self) -> str:
+        with self._lock:
+            return self._xyz_frame
 
     def rot_frame(self) -> str:
         with self._lock:
@@ -488,6 +505,7 @@ class Controller:
         rpy_deg: np.ndarray,
         *,
         duration_s: float | None = None,
+        speed_deg_s: float | None = None,
     ) -> float:
         """TCP 목표까지 IK 한 뒤 관절 보간. TCP 직선은 쓰지 않는다.
 
@@ -498,6 +516,7 @@ class Controller:
             if self._frozen_unlocked():
                 return 0.0
             q = self._q.copy()
+        q0 = q.copy()
         err = float("inf")
         for _ in range(GOTO_JOINTS_IK_FRAMES):
             q = self._kin.clamp_q(
@@ -513,7 +532,12 @@ class Controller:
                 self._clear_motion_unlocked()
                 self._fault = f"IK 실패 ({err * 1000.0:.0f} mm)"
             return 0.0
-        return self.start_joint_goto(self._kin.joints_deg(q), duration_s=duration_s)
+        joints = self._kin.joints_deg(q)
+        if duration_s is None and speed_deg_s is not None:
+            j0 = self._kin.joints_deg(q0)
+            peak = max(abs(float(joints[name]) - float(j0[name])) for name in ARM_JOINT_NAMES)
+            duration_s = None if peak < 1e-3 else peak / float(speed_deg_s)
+        return self.start_joint_goto(joints, duration_s=duration_s)
 
     def _ee_goto_duration_unlocked(
         self,
@@ -525,13 +549,8 @@ class Controller:
         lin_mps: float | None = None,
         rot_deg_s: float | None = None,
     ) -> float:
-        scale = self._speed_scale_unlocked()
         lin = float(self._jog_vel_mps if lin_mps is None else lin_mps)
         rot = float(self._jog_rot_rad_s if rot_deg_s is None else (rot_deg_s * DEG2RAD))
-        if lin_mps is None:
-            lin *= scale
-        if rot_deg_s is None:
-            rot *= scale
         dist = float(np.linalg.norm(np.asarray(xyz1, dtype=float) - np.asarray(xyz0, dtype=float)))
         t_lin = dist / max(lin, 1e-6)
         ang = float(np.linalg.norm(pin.log3(np.asarray(R0, dtype=float).T @ np.asarray(R1, dtype=float))))
@@ -713,6 +732,7 @@ class Controller:
             fault = self._fault
             mode = self._mode
             rot_frame = self._rot_frame
+            xyz_frame = self._xyz_frame
             err = self._ee_err_mm
             err_xyz = None if self._err_xyz_mm is None else xyz_user_from_urdf(self._err_xyz_mm)
         hw = self._hw
@@ -725,6 +745,7 @@ class Controller:
             fault=fault,
             mode=mode,
             rot_frame=rot_frame,
+            xyz_frame=xyz_frame,
             connected=connected,
             torque=torque,
             ee_err_mm=err,
@@ -987,9 +1008,8 @@ class Controller:
         translating = any(cart_jog[k] for k in ("x", "y", "z"))
         rotating = any(cart_jog[k] for k in ("wx", "wy", "wz"))
         with self._lock:
-            scale = self._speed_scale_unlocked()
-            jog_vel = float(self._jog_vel_mps) * scale
-            jog_rot = float(self._jog_rot_rad_s) * scale
+            jog_vel = float(self._jog_vel_mps)
+            jog_rot = float(self._jog_rot_rad_s)
             meas_xyz = (
                 None
                 if self._mode != "real" or self._pose_meas is None
@@ -998,9 +1018,15 @@ class Controller:
             if self._target_xyz is None or self._target_rot is None:
                 self._target_xyz = pose.xyz_m.copy()
                 self._target_rot = pose.rotation.copy()
-            # XYZ jog buttons are project base (+X forward); IK targets stay URDF.
+            # XYZ jog: base = project axes (+X forward). TCP = gripper axes.
+            # Integrated target stays in URDF. Go-to numbers stay base.
             v_user = np.array([cart_jog["x"], cart_jog["y"], cart_jog["z"]], dtype=float)
-            self._target_xyz = self._target_xyz + jog_vel * dt * (R_URDF_FROM_USER @ v_user)
+            xyz_frame = self._xyz_frame
+            if xyz_frame == ROT_FRAME_TCP:
+                delta_urdf = self._target_rot @ v_user
+            else:
+                delta_urdf = R_URDF_FROM_USER @ v_user
+            self._target_xyz = self._target_xyz + jog_vel * dt * delta_urdf
             # Cap vs the arm, not vs q_cmd. IK must keep accumulating on q_cmd
             # or each frame's joint goal stays < 1 Feetech tick and nothing moves.
             ref = meas_xyz if meas_xyz is not None else pose.xyz_m
@@ -1009,13 +1035,21 @@ class Controller:
                 [cart_jog["x"] != 0, cart_jog["y"] != 0, cart_jog["z"] != 0],
                 dtype=bool,
             )
-            # Which URDF axes are being driven (for lead cap).
-            cmd = np.abs(R_URDF_FROM_USER) @ cmd_user.astype(float) > 0.5
-            if translating and np.any(cmd):
-                lead_cmd = np.where(cmd, lead, 0.0)
-                nlead = float(np.linalg.norm(lead_cmd))
-                if nlead > MAX_TARGET_LEAD_M:
-                    self._target_xyz[cmd] = ref[cmd] + lead[cmd] * (MAX_TARGET_LEAD_M / nlead)
+            if translating and xyz_frame == ROT_FRAME_TCP:
+                n = float(np.linalg.norm(delta_urdf))
+                if n > 1e-9:
+                    axis = delta_urdf / n
+                    along = float(np.dot(lead, axis))
+                    if along > MAX_TARGET_LEAD_M:
+                        self._target_xyz -= axis * (along - MAX_TARGET_LEAD_M)
+            else:
+                # Which URDF axes are being driven (for lead cap).
+                cmd = np.abs(R_URDF_FROM_USER) @ cmd_user.astype(float) > 0.5
+                if translating and np.any(cmd):
+                    lead_cmd = np.where(cmd, lead, 0.0)
+                    nlead = float(np.linalg.norm(lead_cmd))
+                    if nlead > MAX_TARGET_LEAD_M:
+                        self._target_xyz[cmd] = ref[cmd] + lead[cmd] * (MAX_TARGET_LEAD_M / nlead)
             if rotating:
                 w_user = jog_rot * dt * np.array(
                     [cart_jog["wx"], cart_jog["wy"], cart_jog["wz"]], dtype=float
@@ -1029,11 +1063,14 @@ class Controller:
                     self._target_rot = pin.exp3(w) @ self._target_rot
             xyz = self._target_xyz.copy()
             rot = self._target_rot.copy()
+            tcp_xyz = xyz_frame == ROT_FRAME_TCP
 
+        # TCP jog moves along the gripper, so the position error is not confined
+        # to one project-base axis. Track the integrated point in all three axes.
         cmd_mask = (
-            np.array([bool(cart_jog["x"]), bool(cart_jog["y"]), bool(cart_jog["z"])], dtype=bool)
-            if translating
-            else None
+            None
+            if (not translating or tcp_xyz)
+            else np.array([bool(cart_jog["x"]), bool(cart_jog["y"]), bool(cart_jog["z"])], dtype=bool)
         )
         q_ik = self._kin.servo_toward(
             q,

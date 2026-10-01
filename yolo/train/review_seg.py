@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from yolo.train.boxes import load_yolo_seg_txt, save_yolo_seg_txt
-from yolo.config import RAW_IMAGES, RAW_LABELS_SEG, add_class_argument, class_from_args, quiet_gtk
+from yolo.config import RAW_IMAGES, RAW_LABELS_SEG, pose_name, quiet_gtk
 
 quiet_gtk()
 
@@ -34,19 +34,28 @@ def _seg_path(image: Path) -> Path:
     return RAW_LABELS_SEG / f"{image.stem}.txt"
 
 
-def _draw(bgr: np.ndarray, polygons, index: int, total: int, class_name: str) -> np.ndarray:
+def _draw(bgr: np.ndarray, polygons, index: int, total: int) -> np.ndarray:
     h, w = bgr.shape[:2]
     overlay = bgr.copy()
     out = bgr.copy()
-    for poly in polygons:
+    for cid, poly in polygons:
         pts = np.array([(int(x * w), int(y * h)) for x, y in poly], dtype=np.int32)
         if len(pts) < 3:
             continue
         cv2.fillPoly(overlay, [pts], (0, 180, 0))
         cv2.polylines(out, [pts], True, (0, 255, 0), 2)
+        cv2.putText(
+            out,
+            pose_name(cid, korean=True),
+            (int(pts[:, 0].min()), max(16, int(pts[:, 1].min()) - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 0),
+            1,
+        )
     vis = cv2.addWeighted(overlay, 0.35, out, 0.65, 0)
     lines = [
-        f"{index + 1}/{total}  {class_name}  masks={len(polygons)}",
+        f"{index + 1}/{total}  masks={len(polygons)}",
         "n=next  p=prev  d=undo  r=clear  q=quit",
     ]
     y = 22
@@ -60,9 +69,7 @@ def _draw(bgr: np.ndarray, polygons, index: int, total: int, class_name: str) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="review SAM masks")
-    add_class_argument(parser)
-    args = parser.parse_args()
-    class_name = class_from_args(args)
+    parser.parse_args()
 
     images = _image_paths()
     if not images:
@@ -79,7 +86,7 @@ def main() -> None:
     print(f"{len(labeled)}장. 틀린 마스크는 d/r 로 지운다.")
     try:
         while True:
-            cv2.imshow(WIN, _draw(bgr, polygons, idx, len(labeled), class_name))
+            cv2.imshow(WIN, _draw(bgr, polygons, idx, len(labeled)))
             key = cv2.waitKey(20) & 0xFF
             if key == 255:
                 continue

@@ -322,11 +322,11 @@ def pose_coverage(
         cov["n_vis"] = int(len(vis))
     # 위에서 찍으면 ㄱ 옆면 깊이가 거의 없다. vis 0.50은 맞는 포즈도 miss.
     # 0.30이면 로그의 70°/세운 CAD(vis~0.1)는 막고, 마지막 0.48은 통과.
+    # 상자 중심 거리는 합격에 넣지 않는다. 윗면만 보이면 맞는 자세도 6mm를 넘는다.
     cov["aligned_ok"] = bool(
         cov["frac"] >= 0.80
         and cov["median"] <= 1.5
         and cov["p90"] <= 4.0
-        and cov["center_delta"] <= 6.0
         and cov["vis_frac"] >= 0.30
     )
     return cov
@@ -654,11 +654,18 @@ def _snap_cad_90(
 
 
 def _partial_icp_to_cad(
-    source, target, T_scene_cad: np.ndarray, *, quick: bool = False
+    source, target, T_scene_cad: np.ndarray, *, quick: bool = False, coarse: bool = False
 ) -> np.ndarray:
     """부분 장면→전체 CAD 방향으로 coarse-to-fine ICP."""
     T = np.asarray(T_scene_cad, dtype=np.float64).reshape(4, 4)
-    if quick:
+    if coarse:
+        # 클래스 시작은 회전만 맞고, ㄴ의 보이는 부분과 CAD 중심은 1~2cm 어긋난다.
+        stages = (
+            (20.0, False, 50),
+            (10.0, True, 60),
+            (5.0, True, 40),
+        )
+    elif quick:
         stages = (
             (5.0, False, 40),
             (2.0, True, 60),
@@ -870,7 +877,10 @@ def refine_icp(
     up: np.ndarray | None = None,
     desk_plane: np.ndarray | None = None,
 ) -> dict:
-    """이전 CAD→장면 T에서 부분 장면→CAD ICP로 추적한다."""
+    """이전 CAD→장면 T에서 부분 장면→CAD ICP로 추적한다.
+
+    수직 스냅은 여기서 하지 않는다. register_pose 가 2° 이내일 때만 붙인다.
+    """
     cad = _as_xyz(cad_xyz)
     scene = _clean_registration_scene(scene_xyz)
     if len(cad) < MIN_POINTS or len(scene) < MIN_POINTS:
@@ -885,8 +895,6 @@ def refine_icp(
         np.linalg.inv(T0),
     )
     best_T = np.linalg.inv(T_scene_cad)
-    if up is not None:
-        best_T = rest_on_desk(best_T, cad_xyz=cad, up=up, desk_plane=desk_plane)
     cov = pose_coverage(cad, scene, best_T, thresh_mm=3.0, camera_origin=cam)
     return {
         "T": best_T,
@@ -944,6 +952,187 @@ def stabilize_T(
     return best
 
 
+CLASS_YAW_STEP_DEG = 30.0
+CLASS_SNAP_MAX_DEG = 2.0
+_CLASS_FULL_KEEP = 3
+
+
+def _wrap_deg(deg: float) -> float:
+    """각도를 (−180, 180] 로 접는다. 180° 와 −180° 는 같은 방향이다."""
+    return float((float(deg) + 180.0) % 360.0 - 180.0)
+
+
+def _yaw_samples(step_deg: float = CLASS_YAW_STEP_DEG) -> list[float]:
+    step = float(step_deg)
+    n = max(1, int(round(360.0 / step)))
+    return [_wrap_deg(-180.0 + i * (360.0 / n)) for i in range(n)]
+
+
+def class_base_rpys(class_id: int) -> list[tuple[float, float, float]]:
+    """펜던트 베이스 extrinsic (Rx, Ry, Rz). 위치는 포함하지 않는다.
+
+    0 서있기: Rx=Ry=0, Rz 한 바퀴.
+    1 눕히기: Rx=+90 과 −90, Ry=0, Rz 한 바퀴.
+    2 비스듬히: Rx=180, Ry=45, Rz=wrap(180+φ).
+    """
+    yaws = _yaw_samples()
+    cid = int(class_id)
+    if cid == 0:
+        return [(0.0, 0.0, yaw) for yaw in yaws]
+    if cid == 1:
+        return [(roll, 0.0, yaw) for roll in (90.0, -90.0) for yaw in yaws]
+    if cid == 2:
+        return [(180.0, 45.0, _wrap_deg(180.0 + phi)) for phi in yaws]
+    raise ValueError(f"자세 클래스가 아닙니다: {class_id}")
+
+
+def _T_from_base_rpy(rpy_deg: tuple[float, float, float]) -> np.ndarray:
+    from motion.robot_kinematics import rpy_deg_to_rotmat
+
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = rpy_deg_to_rotmat(rpy_deg[0], rpy_deg[1], rpy_deg[2])
+    return T
+
+
+def _axis_tilt_deg(T: np.ndarray, up: np.ndarray) -> float:
+    """가장 가까운 CAD 축과 책상 법선 사이 각도. 0이면 그 축이 수직이다."""
+    dots = np.asarray(T, dtype=np.float64).reshape(4, 4)[:3, :3].T @ _unit3(up)
+    cosine = float(np.clip(np.max(np.abs(dots)), 0.0, 1.0))
+    return float(np.degrees(np.arccos(cosine)))
+
+
+def rest_if_close(
+    T: np.ndarray,
+    *,
+    cad_xyz: np.ndarray | None = None,
+    up: np.ndarray | None = None,
+    desk_plane: np.ndarray | None = None,
+    max_deg: float = CLASS_SNAP_MAX_DEG,
+) -> np.ndarray:
+    """축이 max_deg 이내면 수직으로 붙인다. 그보다 크면 ICP 각도를 둔다.
+
+    높이는 항상 책상에 앉힌다. 5° 기운 자세를 수직으로 누르면 CAD가 비뚤어진다.
+    """
+    T = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
+    if up is None:
+        return T
+    if _axis_tilt_deg(T, up) <= float(max_deg):
+        pivot = None if cad_xyz is None else np.mean(_as_xyz(cad_xyz), axis=0)
+        T = snap_cad_to_gravity(T, up, pivot=pivot)
+        T = maybe_flip_into_table(T, up_base=up)
+        if _axis_tilt_deg(T, up) <= float(max_deg):
+            T = snap_cad_to_gravity(T, up, pivot=pivot)
+    if desk_plane is not None and cad_xyz is not None:
+        T = seat_cad_on_plane(T, cad_xyz, desk_plane, up)
+    return T
+
+
+def _known_pose_class(class_id: int | None) -> bool:
+    return class_id is not None and int(class_id) in (0, 1, 2)
+
+
+def register_class_icp(
+    cad_xyz: np.ndarray,
+    scene_xyz: np.ndarray,
+    class_id: int,
+    *,
+    voxel_mm: float = 2.0,
+    camera_origin: np.ndarray | None = None,
+    up: np.ndarray | None = None,
+    desk_plane: np.ndarray | None = None,
+) -> dict:
+    """클래스 자세로 시작점을 만들고, yaw 후보마다 ICP 한다. FPFH 는 하지 않는다."""
+    from yolo.config import pose_name
+
+    cad = _as_xyz(cad_xyz)
+    scene = _clean_registration_scene(scene_xyz)
+    if len(cad) < MIN_POINTS or len(scene) < MIN_POINTS:
+        raise ValueError(f"점 부족  cad={len(cad)} scene={len(scene)}")
+    cam = np.zeros(3) if camera_origin is None else np.asarray(camera_origin, dtype=np.float64)
+    source, _ = _preprocess(_pcd(scene), voxel_mm, camera_origin=cam)
+    target, _ = _preprocess(_pcd(cad), voxel_mm, camera_origin=None)
+    rpys = class_base_rpys(class_id)
+    name = pose_name(int(class_id), korean=True)
+    print(f"CAD 클래스 {name}  후보 {len(rpys)}개, {CLASS_YAW_STEP_DEG:.0f}° 간격")
+    ranked: list[tuple[tuple, np.ndarray, tuple[float, float, float]]] = []
+    for rpy in rpys:
+        T0 = _shift_centroids(_T_from_base_rpy(rpy), cad, scene)
+        if up is not None and desk_plane is not None:
+            T0 = seat_cad_on_plane(T0, cad, desk_plane, up)
+        T_sc = _partial_icp_to_cad(source, target, np.linalg.inv(T0), coarse=True)
+        T = np.linalg.inv(T_sc)
+        cov = pose_coverage(cad, scene, T, thresh_mm=3.0, camera_origin=cam, detail=False)
+        ranked.append((_score_key(cov), T, rpy))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    best_T = None
+    best_cov = None
+    best_key = None
+    best_rpy = rpys[0]
+    for _key, Tq, rpy in ranked[:_CLASS_FULL_KEEP]:
+        T_sc = _partial_icp_to_cad(source, target, np.linalg.inv(Tq), quick=False)
+        T = rest_if_close(
+            np.linalg.inv(T_sc),
+            cad_xyz=cad,
+            up=up,
+            desk_plane=desk_plane,
+        )
+        cov = pose_coverage(
+            cad, scene, T, thresh_mm=3.0, camera_origin=cam, detail=True
+        )
+        key = _score_key(cov)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_T = T
+            best_cov = cov
+            best_rpy = rpy
+    assert best_T is not None and best_cov is not None
+    print(
+        f"  클래스 후보 rpy=[{best_rpy[0]:.1f}, {best_rpy[1]:.1f}, {best_rpy[2]:.1f}]  "
+        f"on={best_cov['frac']:.2f} vis={best_cov['vis_frac']:.2f} "
+        f"med={best_cov['median']:.2f}"
+    )
+    return {
+        "T": best_T,
+        "T_init": _T_from_base_rpy(best_rpy),
+        "fitness": best_cov["frac"],
+        "inlier_rmse": best_cov["median"],
+        "fitness_ransac": 0.0,
+        "inlier_rmse_ransac": 0.0,
+        "icp_method": "class_icp",
+        "scene_frac": best_cov["frac"],
+        "scene_med": best_cov["median"],
+        "scene_p90": best_cov["p90"],
+        "vis_frac": best_cov["vis_frac"],
+        "xy_iou": best_cov["xy_iou"],
+        "center_delta": best_cov["center_delta"],
+        "aligned_ok": best_cov["aligned_ok"],
+        "n_cad": int(len(target.points)),
+        "n_scene": int(len(source.points)),
+        "voxel_mm": float(voxel_mm),
+        "source": "class_icp",
+        "class_id": int(class_id),
+        "init_rpy": best_rpy,
+        "soft_gravity": True,
+    }
+
+
+def _apply_gravity(
+    T: np.ndarray,
+    *,
+    cad_xyz: np.ndarray,
+    up: np.ndarray | None,
+    desk_plane: np.ndarray | None,
+    soft: bool,
+) -> np.ndarray:
+    if up is None:
+        return np.asarray(T, dtype=np.float64).reshape(4, 4)
+    if soft:
+        return rest_if_close(T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane)
+    T = rest_on_desk(T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane)
+    T = maybe_flip_into_table(T, up_base=up)
+    return rest_on_desk(T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane)
+
+
 def register_pose(
     scene_xyz: np.ndarray,
     *,
@@ -956,9 +1145,11 @@ def register_pose(
     T_prev: np.ndarray | None = None,
     camera_origin: np.ndarray | None = None,
     desk_plane: np.ndarray | None = None,
+    class_id: int | None = None,
 ) -> dict:
     """한 인스턴스 점군 → T, xyzrpy.
 
+    class_id 가 0/1/2 이면 그 자세 후보로 ICP. 전부 실패하면 FPFH 한 번.
     T_init 이 있으면 RANSAC 없이 ICP만. T_prev 가 있으면 180°를 고정한다.
     """
     cad_xyz = load_cad_xyz(cad_path, voxel_mm=voxel_mm)
@@ -974,6 +1165,28 @@ def register_pose(
             up=up,
             desk_plane=desk_plane,
         )
+        raw["soft_gravity"] = True
+    elif _known_pose_class(class_id):
+        raw = register_class_icp(
+            cad_xyz,
+            scene_xyz,
+            int(class_id),
+            voxel_mm=voxel_mm,
+            camera_origin=cam,
+            up=up,
+            desk_plane=desk_plane,
+        )
+        if not raw.get("aligned_ok", False):
+            print("클래스 후보 miss. FPFH 한 번.")
+            raw = register_fpfh_icp(
+                cad_xyz,
+                scene_xyz,
+                voxel_mm=voxel_mm,
+                tries=tries,
+                camera_origin=cam,
+                up=up,
+                desk_plane=desk_plane,
+            )
     else:
         raw = register_fpfh_icp(
             cad_xyz,
@@ -985,18 +1198,19 @@ def register_pose(
             desk_plane=desk_plane,
         )
     T = raw["T"]
+    soft = bool(raw.get("soft_gravity", False))
     if T_base_cam is not None:
         T = np.asarray(T_base_cam, dtype=np.float64).reshape(4, 4) @ T
         if flip:
             z_up = np.array([0.0, 0.0, 1.0])
             z_plane = np.array([0.0, 0.0, 1.0, 0.0])
-            T = rest_on_desk(T, cad_xyz=cad_xyz, up=z_up, desk_plane=z_plane)
-            T = maybe_flip_into_table(T, up_base=z_up)
-            T = rest_on_desk(T, cad_xyz=cad_xyz, up=z_up, desk_plane=z_plane)
+            T = _apply_gravity(
+                T, cad_xyz=cad_xyz, up=z_up, desk_plane=z_plane, soft=soft
+            )
     elif up is not None:
-        T = rest_on_desk(T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane)
-        T = maybe_flip_into_table(T, up_base=up)
-        T = rest_on_desk(T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane)
+        T = _apply_gravity(
+            T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane, soft=soft
+        )
     T = stabilize_T(T, T_prev, pivot=np.median(cad_xyz, axis=0))
     if T_base_cam is None:
         cov = pose_coverage(
@@ -1033,6 +1247,7 @@ def register_pose(
         "xy_iou": raw.get("xy_iou"),
         "center_delta": raw.get("center_delta"),
         "aligned_ok": bool(raw.get("aligned_ok", False)),
+        "class_id": raw.get("class_id"),
     }
 
 

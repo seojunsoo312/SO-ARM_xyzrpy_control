@@ -45,8 +45,8 @@ class PickPlaceStep:
 @dataclass
 class PickPlaceRunner:
     ctrl: Controller
-    lin_mps: float = 0.030
-    rot_deg_s: float = 45.0
+    lin_mps: float | None = None
+    rot_deg_s: float | None = None
     _steps: list[PickPlaceStep] = field(default_factory=list)
     _i: int = 0
     _phase: str = "idle"  # idle | running | done | fault
@@ -132,8 +132,8 @@ class PickPlaceRunner:
             dur = self.ctrl.start_ee_goto(
                 np.asarray(step.xyz_mm, dtype=float),
                 np.asarray(step.rpy_deg, dtype=float),
-                lin_mps=float(self.lin_mps),
-                rot_deg_s=float(self.rot_deg_s),
+                lin_mps=self.lin_mps,
+                rot_deg_s=self.rot_deg_s,
             )
         elif step.kind == "ee_joints":
             dur = self.ctrl.start_ee_goto_joints(

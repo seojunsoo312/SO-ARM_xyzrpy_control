@@ -15,7 +15,6 @@ from yolo.pose.depth_cloud import (
     Z_MAX_MM,
     Z_MIN_MM,
     largest_component,
-    mask_from_quad,
     mask_from_seg,
     mask_from_seg_xy,
     mask_from_xyxy,
@@ -23,7 +22,7 @@ from yolo.pose.depth_cloud import (
     points_from_mask,
 )
 
-MASK_PLANE_MM = 2.0
+MASK_PLANE_MM = 3.0
 
 
 @dataclass
@@ -34,7 +33,8 @@ class InstanceCloud:
     rgb: np.ndarray
     height_score: float
     n_zok: int = 0
-    quad: np.ndarray | None = None  # (4, 2) YOLO OBB, else AABB 꼭짓점
+    quad: np.ndarray | None = None  # (4, 2) 가로세로 박스 꼭짓점
+    class_id: int | None = None
 
 
 def height_above_plane(xyz: np.ndarray, plane: np.ndarray) -> np.ndarray:
@@ -69,35 +69,31 @@ def collect_instances(
     stride: int,
     T_base_cam: np.ndarray | None,
 ) -> list[InstanceCloud]:
-    """One cloud per YOLO OBB (optional seg ∩ desk foreground)."""
+    """One cloud per YOLO box (optional seg ∩ desk foreground)."""
     h, w = bgr.shape[:2]
     out: list[InstanceCloud] = []
     obb = getattr(result, "obb", None)
-    dets = obb if obb is not None and len(obb) else result.boxes
+    boxes = getattr(result, "boxes", None)
+    dets = boxes if boxes is not None and len(boxes) else obb
     if dets is None:
         return out
-    use_obb = obb is not None and len(obb) and dets is obb
     in_base = T_base_cam is not None
     for i, det in enumerate(dets):
-        if use_obb and getattr(det, "xyxyxyxy", None) is not None:
-            raw = det.xyxyxyxy[0]
-            if hasattr(raw, "cpu"):
-                raw = raw.cpu().numpy()
-            quad = np.asarray(raw, dtype=np.float32).reshape(-1, 2)[:4]
-            xyxy = [
-                float(quad[:, 0].min()),
-                float(quad[:, 1].min()),
-                float(quad[:, 0].max()),
-                float(quad[:, 1].max()),
-            ]
-            roi = mask_from_quad(h, w, quad, pad=pad)
-        else:
-            xyxy = det.xyxy[0].tolist()
-            xa, ya, xb, yb = (float(v) for v in xyxy)
-            quad = np.array(
-                [[xa, ya], [xb, ya], [xb, yb], [xa, yb]], dtype=np.float32
-            )
-            roi = mask_from_xyxy(h, w, xyxy, pad=pad)
+        raw = det.xyxy[0]
+        if hasattr(raw, "cpu"):
+            raw = raw.cpu().numpy()
+        xyxy = [float(v) for v in np.asarray(raw).reshape(-1)[:4]]
+        xa, ya, xb, yb = xyxy
+        quad = np.array([[xa, ya], [xb, ya], [xb, yb], [xa, yb]], dtype=np.float32)
+        class_id = None
+        cls = getattr(det, "cls", None)
+        if cls is not None:
+            if hasattr(cls, "cpu"):
+                cls = cls.cpu().numpy()
+            cls_arr = np.asarray(cls).reshape(-1)
+            if len(cls_arr):
+                class_id = int(cls_arr[0])
+        roi = mask_from_xyxy(h, w, xyxy, pad=pad)
         if use_mask and result.masks is not None:
             if result.masks.xy is not None and i < len(result.masks.xy):
                 roi = roi & mask_from_seg_xy(result.masks.xy, i, h, w)
@@ -108,7 +104,7 @@ def collect_instances(
                 roi & (depth > Z_MIN_MM) & (depth < Z_MAX_MM)
             )
         )
-        # 박스: --plane-mm (기본 4). 마스크: 2mm. ㄴ 바닥(~2mm)은 남기고 책상만 자른다.
+        # 박스: --plane-mm (기본 3). 마스크: 3mm. 책상 평면에서 이 거리 이내 점은 제거한다.
         if plane is not None:
             cut_mm = MASK_PLANE_MM if use_mask else float(plane_mm)
             roi = roi & plane_foreground_mask(depth, K, plane, height_mm=cut_mm)
@@ -126,6 +122,7 @@ def collect_instances(
                 height_score=score,
                 n_zok=n_zok,
                 quad=quad,
+                class_id=class_id,
             )
         )
     return out

@@ -1,7 +1,7 @@
-"""Single-class YOLO paths and names.
+"""YOLO paths and pose-class names.
 
-클래스 이름은 여기만 바꾼다. 라벨 파일은 인덱스 0이라 학습 전에 이름을
-바꿔도 된다.
+자세 클래스는 POSE_CLASSES 가 정본이다. 라벨 txt 의 맨 앞 숫자가 그 인덱스다.
+기존 파일의 0 은 지우지 않는다. 라벨 UI에서 눌러 고치기 전까지 서있기로 읽힌다.
 """
 
 from __future__ import annotations
@@ -13,6 +13,12 @@ ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
 
 CLASS_ID = 0
+# (인덱스, data.yaml 이름, 라벨 화면). 베이스 자세: 서있기 / 눕히기 / 비스듬히.
+POSE_CLASSES: tuple[tuple[int, str, str], ...] = (
+    (0, "stand", "서있기"),
+    (1, "lie", "눕히기"),
+    (2, "slant", "비스듬히"),
+)
 
 RAW_IMAGES = ROOT / "datasets" / "raw" / "images"
 RAW_LABELS = ROOT / "datasets" / "raw" / "labels"
@@ -24,6 +30,11 @@ SEG_VIEW = ROOT / "datasets" / "seg"
 DATA_YAML = ROOT / "data.yaml"
 WEIGHTS_DIR = ROOT / "weights"
 RUNS_DIR = ROOT / "runs"
+# roi_cloud 가 맞춘 베이스 6D. 픽앤플레이스가 읽는다.
+PLACE_POSE_JSON = RUNS_DIR / "roi" / "place_pose.json"
+# 펜던트가 등록을 요청하고, roi_cloud 가 같은 id 로 상태를 돌려준다.
+REGISTER_REQUEST_JSON = RUNS_DIR / "roi" / "register_request.json"
+REGISTER_STATUS_JSON = RUNS_DIR / "roi" / "register_status.json"
 BEST_PT = WEIGHTS_DIR / "best.pt"
 BEST_SEG_PT = WEIGHTS_DIR / "best-seg.pt"
 _SAM_LOCAL = WEIGHTS_DIR / "mobile_sam.pt"
@@ -101,6 +112,24 @@ def class_name() -> str:
 CLASS_NAME = class_name()
 
 
+def pose_class_ids() -> tuple[int, ...]:
+    return tuple(cid for cid, _name, _ko in POSE_CLASSES)
+
+
+def pose_name(class_id: int, *, korean: bool = False) -> str:
+    for cid, name, ko in POSE_CLASSES:
+        if cid == int(class_id):
+            return ko if korean else name
+    return str(class_id)
+
+
+def pose_names_yaml() -> str:
+    lines = [f"nc: {len(POSE_CLASSES)}", "names:"]
+    for cid, name, _ko in POSE_CLASSES:
+        lines.append(f"  {cid}: {name}")
+    return "\n".join(lines) + "\n"
+
+
 def add_class_argument(parser) -> None:
     parser.add_argument(
         "--class-name",
@@ -131,9 +160,46 @@ DETECT_CONF = 0.5
 
 def default_start_pt(*, seg: bool) -> str:
     """전이학습 시작 가중치. weights/ 에 있으면 그 경로, 없으면 파일명만 (ultralytics 가 받음)."""
-    name = "yolo11n-seg.pt" if seg else "yolo11n-obb.pt"
+    name = "yolo11n-seg.pt" if seg else "yolo11n.pt"
     local = WEIGHTS_DIR / name
     return str(local) if local.is_file() else name
+
+
+def _system_font_dir() -> Path | None:
+    for fonts in (
+        Path("/usr/share/fonts/truetype/dejavu"),
+        Path("/usr/share/fonts/truetype/liberation"),
+        Path("/usr/share/fonts/truetype"),
+    ):
+        if fonts.is_dir() and any(fonts.glob("*.ttf")):
+            return fonts
+    return None
+
+
+def _link_cv2_qt_fonts(fonts: Path) -> None:
+    """opencv-python 의 Qt 는 fontconfig 가 없고 cv2/qt/fonts 만 본다."""
+    import sys
+
+    ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    qt_dirs = [
+        Path(sys.executable).resolve().parent.parent / "lib" / ver / "site-packages" / "cv2" / "qt",
+    ]
+    for entry in sys.path:
+        qt_dirs.append(Path(entry) / "cv2" / "qt")
+    target = fonts.resolve()
+    for qt in qt_dirs:
+        if not qt.is_dir():
+            continue
+        dest = qt / "fonts"
+        try:
+            if dest.is_symlink() and dest.resolve() == target:
+                return
+            if dest.exists():
+                return
+            dest.symlink_to(target, target_is_directory=True)
+        except OSError:
+            continue
+        return
 
 
 def quiet_gtk() -> None:
@@ -144,15 +210,12 @@ def quiet_gtk() -> None:
         os.environ[key] = ":".join(
             p for p in raw.split(":") if p and "canberra" not in p.lower()
         )
-    # conda opencv-python 5 는 Qt GUI. 폰트 경로가 없으면 창이 안 뜨거나 경고만 난다.
-    for fonts in (
-        Path("/usr/share/fonts/truetype/dejavu"),
-        Path("/usr/share/fonts/truetype/liberation"),
-        Path("/usr/share/fonts/truetype"),
-    ):
-        if fonts.is_dir():
-            os.environ.setdefault("QT_QPA_FONTDIR", str(fonts))
-            break
+    # conda opencv-python 의 Qt 는 글꼴을 안 넣고, cv2/qt/fonts 가 없으면 경고만 낸다.
+    fonts = _system_font_dir()
+    if fonts is None:
+        return
+    os.environ["QT_QPA_FONTDIR"] = str(fonts)
+    _link_cv2_qt_fonts(fonts)
 
 
 def ensure_project_on_path() -> None:

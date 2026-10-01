@@ -1,6 +1,8 @@
 path: /home/junsoo/Project/yolo
 train: datasets/splits/train.txt
 val: datasets/splits/val.txt
-nc: 1
+nc: 3
 names:
-  0: bracket
+  0: stand
+  1: lie
+  2: slant

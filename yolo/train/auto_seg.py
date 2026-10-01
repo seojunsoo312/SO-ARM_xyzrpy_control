@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""OBB 라벨을 SAM 프롬프트로 마스크(폴리곤)로 바꾼다.
+"""박스 라벨을 SAM 프롬프트로 마스크(폴리곤)로 바꾼다.
 
-기존 OBB(`datasets/raw/labels`)는 그대로 둔다. SAM에는 AABB(외접 박스)를 넣는다.
+기존 박스(`datasets/raw/labels`)는 그대로 둔다. SAM에는 그 가로세로 박스를 넣는다.
 결과는 `datasets/raw/labels_seg`. 빈 책상(박스 없음)은 빈 txt.
 
   python yolo/train/auto_seg.py
@@ -54,7 +54,7 @@ def _polygons_from_result(result, w: int, h: int):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="OBB labels → SAM polygons")
+    parser = argparse.ArgumentParser(description="box labels → SAM polygons")
     parser.add_argument("--model", default=SAM_MODEL, help="ultralytics SAM 가중치")
     parser.add_argument("--imgsz", type=int, default=640, help="Orin은 640. OOM이면 512")
     parser.add_argument("--force", action="store_true", help="labels_seg 가 있어도 덮어씀")
@@ -86,7 +86,7 @@ def main() -> None:
         lab = RAW_LABELS / f"{img_path.stem}.txt"
         dest = RAW_LABELS_SEG / f"{img_path.stem}.txt"
         if not lab.exists():
-            print(f"건너뜀(OBB 라벨 없음): {img_path.name}")
+            print(f"건너뜀(박스 라벨 없음): {img_path.name}")
             skipped += 1
             continue
         if dest.exists() and not args.force:
@@ -98,13 +98,14 @@ def main() -> None:
             failed += 1
             continue
         h, w = bgr.shape[:2]
-        boxes = load_yolo_txt(lab, w, h)
-        if not boxes:
+        labeled = load_yolo_txt(lab, w, h)
+        if not labeled:
             save_yolo_seg_txt(dest, [])
             empty += 1
             print(f"{img_path.name}  빈 장면")
             continue
-        xyxy = [quad_to_xyxy(quad) for quad in boxes]
+        xyxy = [quad_to_xyxy(box.quad) for box in labeled]
+        class_ids = [box.class_id for box in labeled]
         try:
             results = sam.predict(
                 bgr,
@@ -118,12 +119,12 @@ def main() -> None:
             print(f"실패 {img_path.name}: {exc}")
             failed += 1
             continue
-        if len(polys) != len(boxes):
+        if len(polys) != len(labeled):
             print(
-                f"주의 {img_path.name}: 박스 {len(boxes)} → 마스크 {len(polys)}. "
+                f"주의 {img_path.name}: 박스 {len(labeled)} → 마스크 {len(polys)}. "
                 "review_seg 에서 확인."
             )
-        save_yolo_seg_txt(dest, polys)
+        save_yolo_seg_txt(dest, polys, class_ids)
         done += 1
         print(f"{img_path.name}  masks={len(polys)}")
         del results

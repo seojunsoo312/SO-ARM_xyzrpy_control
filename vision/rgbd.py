@@ -508,6 +508,7 @@ class OrbbecV1:
             self._set_log = _bind(L, "ob_set_logger_severity", None, c_int, EP)
             self._errmsg = _bind(L, "ob_error_message", c_char_p, c_void_p)
             self._delerr = _bind(L, "ob_delete_error", None, c_void_p)
+            self._quiet_log()
 
             err = c_void_p()
             self.pipe = self._create(byref(err))
@@ -1110,7 +1111,7 @@ class OrbbecV1:
         return raw.reshape(h, w).astype(np.float32) * scale
 
     def _quiet_log(self) -> None:
-        """stop 때 libusb cancel Success 경고가 쏟아지지 않게 한다."""
+        """경고는 끄고 에러만 남긴다. 큐 초과·1ms 타임아웃 로그가 여기에 해당한다."""
         fn = getattr(self, "_set_log", None)
         if fn is None:
             return

@@ -3,16 +3,45 @@
 
 권장: 펜던트와 한 프로세스·한 Meshcat.
 
-  python pendant/main.py              # 펜던트만
-  python pendant/main.py --grasp      # 조그 + 물체 집기 창 (같은 Meshcat)
+  python pendant/main.py              # 펜던트만 (사물 위치 칸은 잠김)
+  python pendant/main.py --grasp      # 같은 창에서 사물 위치 칸 조작
   python pendant/teach_grasp.py       # 물체 창만 (가상 팔로 P/G 이동)
+
+랜덤 배치 세 자세의 Rx/Ry/Rz (sample_random_place).
+각 자세마다 물체 축 기준과 베이스 기준을 둘 다 적는다.
+저장·yaml 은 베이스. 「베이스」= extrinsic XYZ, R = Rz @ Ry @ Rx.
+「물체 축」= intrinsic XYZ, R = Rx @ Ry @ Rz.
+
+서있기 (세우기). CAD Z 가 베이스 +Z (수직으로 섬).
+  물체 축: Rx=0, Ry=0, Rz=−180~180
+  베이스:   Rx=0, Ry=0, Rz=−180~180 (물체 축과 같은 값)
+
+눕히기. CAD Y 가 ±베이스 Z 와 나란하다 (납작하게 누움).
+  물체 축: Rx=+90 또는 −90, Ry=−180~180, Rz=0
+  베이스:   Rx=물체 축 Rx 와 같은 ±90, Ry=0, Rz=(그 Rx 의 부호)×(물체 축 Ry)
+  예: 물체 축 (90, 30, 0) → 베이스 (90, 0, 30)
+      물체 축 (−90, 30, 0) → 베이스 (−90, 0, −30)
+  물체 축 Ry 가 ±180 이면 같은 자세가 접혀, 물체 축이
+  (∓90, 0, 180) 쪽으로 다시 읽힐 수 있다. 베이스는 (Rx, 0, ±180).
+
+비스듬히. CAD 축 (−1, 0, −1)/√2 를 베이스 +Z 에 맞춘 뒤(ㅅ),
+그 축으로 φ(−180~180) 만큼 돌린다. R = Rz(φ) @ R0, R0 = Rz(180) @ Ry(45) @ Rx(180).
+  물체 축: φ마다 Rx·Ry·Rz 가 같이 바뀐다.
+           φ=0 → (−180, 45, −180),  φ=90 → (−135, 0, 90)
+  베이스:   Rx=180, Ry=45 고정, Rz=wrap(180+φ) (−180~180).
+           φ=0 → (180, 45, 180),  φ=90 → (180, 45, −90)
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
+import json
 import sys
+import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +53,19 @@ for path in (PROJECT, PENDANT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from yolo.config import CAD_YAML, cad_mesh_path, cad_unit, quiet_gtk  # noqa: E402
+from ui_style import apply_root_fonts, apply_ui_theme, enable_xft_tk, ui_font  # noqa: E402
+
+enable_xft_tk()
+apply_ui_theme()
+
+from yolo.config import (  # noqa: E402
+    CAD_YAML,
+    REGISTER_REQUEST_JSON,
+    REGISTER_STATUS_JSON,
+    cad_mesh_path,
+    cad_unit,
+    quiet_gtk,
+)
 from yolo.pose.register import _to_mm  # noqa: E402
 from motion.pick_place import PickPlaceRunner, build_pick_place_steps  # noqa: E402
 
@@ -39,18 +80,18 @@ DEFAULT_DROP_XY_MM = (150.0, -100.0)
 DEFAULT_APPROACH_D_MM = 10.0
 DEFAULT_APPROACH_A_MM = 30.0  # pre → grasp along axis (mm toward CAD origin)
 APPROACH_MARKER_RADIUS_M = 0.004  # 4 mm
+REG_ACK_S = 2.0
+REG_JOB_S = 30.0
+REG_POLL_MS = 200
+_REG_RUN = "현재 등록 중입니다."
+_REG_NO_BOX = "바운딩 박스가 없습니다. 카메라 창을 확인해 주세요."
+_REG_FAIL = "등록에 실패했습니다. 카메라 창을 확인해 주세요."
+_REG_NO_REPLY = "카메라 창이 응답하지 않습니다. 실행중인지 확인해주세요"
 # TCP vs orange pre sphere: turn green when close (debug go-to).
 PRE_TCP_MATCH_POS_MM = 1.5
 APPROACH_PRE_COLOR = 0xFB923C
 APPROACH_PRE_MATCH_COLOR = 0x22C55E
 APPROACH_OTHER_COLOR = 0xC2410C
-# Teach 대기/집기 위치 go-to (not jog). 30 mm/s, 45 deg/s.
-GOTO_LIN_MPS = 0.030
-GOTO_LIN_MIN_MPS = 0.010
-GOTO_LIN_MAX_MPS = 0.080
-GOTO_ROT_DEG_S = 45.0
-GOTO_ROT_MIN_DEG_S = 10.0
-GOTO_ROT_MAX_DEG_S = 90.0
 # Random place (project base mm): polar sector ∩ box ∩ r ring ∩ height, mesh above floor.
 # x=r·cosθ, y=r·sinθ; θ ∈ (−90°, 90°) → x > 0 (전진) half-plane.
 # r_min: INIT 팔과 AABB 겹침 회피. r_max: 먼 코너 IK (r≳271 mm) 회피. 박스는 유지.
@@ -977,6 +1018,22 @@ def load_cad_mesh_m(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return verts_mm / 1000.0, faces
 
 
+def _load_user_pick_run():
+    """프로젝트 루트의 user_pickandplace.py 를 매번 다시 읽는다."""
+    path = PROJECT / "user_pickandplace.py"
+    if not path.is_file():
+        raise FileNotFoundError(f"파일 없음: {path}")
+    spec = importlib.util.spec_from_file_location("user_pickandplace_live", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("user_pickandplace.py 를 읽지 못했습니다")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    run = getattr(module, "run", None)
+    if not callable(run):
+        raise RuntimeError("user_pickandplace.py 에 run(arm) 함수가 없습니다")
+    return run
+
+
 class TeachGraspGui:
     def __init__(
         self,
@@ -993,10 +1050,21 @@ class TeachGraspGui:
         controller=None,
         own_robot: bool = True,
         drive_viz: bool = False,
+        embedded: bool = False,
+        enabled: bool = True,
+        actions_parent=None,
     ) -> None:
         import customtkinter as ctk
 
         self.root = root
+        self._embedded = bool(embedded)
+        self._panel_enabled = bool(enabled) if self._embedded else True
+        self._panel_labels: list = []
+        self._panel_buttons: list = []
+        self._mode_cbs: list = []
+        self._place_xyz_frame = "base"
+        if not self._embedded:
+            apply_root_fonts(root)
         self._viz = visualizer
         self._kin = kinematics
         self._ctrl = controller
@@ -1017,15 +1085,15 @@ class TeachGraspGui:
         self._rpy_apply_after: str | None = None
         self._replay_after: str | None = None
         self._pp_after: str | None = None
-        self._goto_lin_mps = float(GOTO_LIN_MPS)
-        self._goto_rot_deg_s = float(GOTO_ROT_DEG_S)
-        self._lin_vel_label = None
-        self._rot_vel_label = None
+        self._reg_after: str | None = None
+        self._reg_req_id: str | None = None
+        self._reg_ack_deadline = 0.0
+        self._reg_job_deadline = 0.0
+        self._reg_accepted = False
         self._pp_runner: PickPlaceRunner | None = (
-            PickPlaceRunner(controller, lin_mps=self._goto_lin_mps, rot_deg_s=self._goto_rot_deg_s)
-            if controller is not None
-            else None
+            PickPlaceRunner(controller) if controller is not None else None
         )
+        self._user_pp_thread: threading.Thread | None = None
         verts = np.asarray(vertices_m, dtype=float).reshape(-1, 3)
         self._cad_verts_m = verts
         self._cad_mins_mm = verts.min(axis=0) * 1000.0
@@ -1038,81 +1106,75 @@ class TeachGraspGui:
         yaml_root = _parse_model_yaml(CAD_YAML)
         approach_d0 = _scalar(yaml_root.get("approach_d_mm"), DEFAULT_APPROACH_D_MM)
         approach_a0 = _scalar(yaml_root.get("approach_a_mm"), DEFAULT_APPROACH_A_MM)
+        self._approach_d_mm = float(approach_d0)
+        self._approach_a_mm = float(approach_a0)
         drop_xy0 = load_drop_xy_mm(CAD_YAML)
         self._drop_xy = drop_xy0
         # place 저장/적용 = 베이스 extrinsic (_place_rpy_prev, canonicalize).
-        # UI 칸·슬라이더 숫자 = 물체축 RPY (Rx@Ry@Rz). 드래그=물체 축 증분.
+        # 화면 숫자 = 물체 축 또는 베이스. 버튼으로 표기만 바꾼다.
+        self._place_rpy_frame = "body"
         self._place_rpy_prev = canonicalize_extrinsic_rpy(place.rpy_deg)
-        body_rpy = rpy_extrinsic_to_body_xyz(self._place_rpy_prev)
-        self._place_slider_cmd = {
-            "roll": float(body_rpy[0]),
-            "pitch": float(body_rpy[1]),
-            "yaw": float(body_rpy[2]),
-        }
+        shown = self._place_rpy_shown()
+        self._place_slider_cmd = dict(shown)
 
-        root.title("물체 집기 티칭")
-        root.minsize(520, 1100)
-        root.geometry("560x1200")
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        if self._ctrl is not None:
-            robot_hint = "대기/집기 위치는 단발, 픽앤플레이스는 시퀀스. 조그는 펜던트."
-        elif self._own_robot:
-            robot_hint = "단독 모드: 적용 시 팔은 HOME, 그리퍼만 반영. 이동은 펜던트 --grasp 권장."
+        if not self._embedded:
+            root.title("물체 집기 티칭")
+            root.minsize(980, 720)
+            root.geometry("1080x860")
+            root.protocol("WM_DELETE_WINDOW", self.on_close)
+            split = ctk.CTkFrame(root, fg_color="transparent")
+            split.pack(fill="both", expand=True)
+            host = ctk.CTkFrame(split)
+            actions_host = ctk.CTkFrame(split)
+            host.pack(side="left", fill="both", expand=True, padx=(8, 4), pady=8)
+            actions_host.pack(side="left", fill="y", padx=(4, 8), pady=8)
         else:
-            robot_hint = "팔 컨트롤러 없음. 오버레이만."
-        ctk.CTkLabel(
-            root,
-            text=(
-                f"CAD {mesh_path.name}  ·  Meshcat: {meshcat_url or 'printed URL'}\n"
-                f"xyz = 물체 원점(베이스). RPY는 물체 축 / 베이스 두 가지로 표기.\n"
-                f"슬라이더·위쪽 칸 = 물체 축. 아래 베이스 칸 = yaml과 동일 (붙여넣기용). {robot_hint}"
-            ),
-            anchor="w",
-            justify="left",
-        ).pack(fill="x", padx=14, pady=(14, 8))
+            host = root
+            actions_host = actions_parent if actions_parent is not None else root
+        self._host = host
+        self._actions_host = actions_host
 
-        body = ctk.CTkFrame(root, fg_color="transparent")
-        body.pack(fill="x", padx=10, pady=(0, 0))
-
-        self._section(body, "시뮬 물체 xyz (원점 · 베이스 mm)")
+        # TCP 칸과 같은 시작 높이·같은 줄 간격. 박스는 TCP 행과 같은 CTkFrame.
+        title = ctk.CTkLabel(host, text="사물의 위치", anchor="w")
+        title.pack(anchor="w", padx=8, pady=(8, 4))
+        self._panel_labels.append(title)
+        self._place_xyz_seg = self._xyz_jog_frame_bar(host)
         for key, label, val in (
-            ("place_x", "x mm", place.xyz_mm[0]),
-            ("place_y", "y mm", place.xyz_mm[1]),
-            ("place_z", "z mm", place.xyz_mm[2]),
+            ("place_x", "x (mm)", place.xyz_mm[0]),
+            ("place_y", "y (mm)", place.xyz_mm[1]),
+            ("place_z", "z (mm)", place.xyz_mm[2]),
         ):
-            self._xyz_row(body, key, float(val), label)
+            self._xyz_row(host, key, float(val), label)
 
-        self._section(body, "물체 축 Rx/Ry/Rz (Meshcat 빨강/초록/파랑)")
-        for key, label, val in (
-            ("place_roll", "물체 Rx", body_rpy[0]),
-            ("place_pitch", "물체 Ry", body_rpy[1]),
-            ("place_yaw", "물체 Rz", body_rpy[2]),
+        rpy_head = ctk.CTkFrame(host, fg_color="transparent")
+        rpy_head.pack(fill="x", padx=6, pady=(10, 2))
+        rpy_title = ctk.CTkLabel(rpy_head, text="Rx/Ry/Rz", width=200, anchor="w")
+        rpy_title.pack(side="left", padx=(4, 2))
+        self._panel_labels.append(rpy_title)
+        self._place_rpy_seg = ctk.CTkSegmentedButton(
+            rpy_head,
+            values=["base", "OBJ"],
+            command=self._on_place_rpy_frame,
+            width=148,
+        )
+        self._place_rpy_seg.set("OBJ")
+        self._place_rpy_seg.pack(side="left", padx=(8, 4))
+        for key, label, axis in (
+            ("place_roll", "Rx", "roll"),
+            ("place_pitch", "Ry", "pitch"),
+            ("place_yaw", "Rz", "yaw"),
         ):
-            self._rpy_row(body, key, float(val), label)
-        ctk.CTkLabel(
-            body,
-            text="드래그 = 물체 축 증분 (원점 고정). Rz만 돌리면 물체 Rz 숫자만 바뀌는 건 정상.",
+            self._rpy_row(host, key, float(shown[axis]), label)
+        self._rpy_hint = ctk.CTkLabel(
+            host,
+            text="",
             text_color="#9ca3af",
             anchor="w",
-        ).pack(fill="x", padx=8, pady=(0, 2))
+        )
+        self._rpy_hint.pack(fill="x", padx=8, pady=(0, 2))
+        self._update_rpy_hint()
 
-        self._section(body, "베이스 Rx/Ry/Rz (yaml place · roi_cloud)")
-        self._place_base_entries: dict[str, object] = {}
-        for axis, label, val in (
-            ("roll", "베이스 Rx", place.rpy_deg[0]),
-            ("pitch", "베이스 Ry", place.rpy_deg[1]),
-            ("yaw", "베이스 Rz", place.rpy_deg[2]),
-        ):
-            self._place_base_rpy_row(body, axis, float(val), label)
-        ctk.CTkLabel(
-            body,
-            text="칸 입력 = 베이스 절대값 (저장/적용과 동일). 물체 축 칸과 항상 동기화.",
-            text_color="#9ca3af",
-            anchor="w",
-        ).pack(fill="x", padx=8, pady=(0, 2))
-
-        hide_row = ctk.CTkFrame(body, fg_color="transparent")
+        hide_row = ctk.CTkFrame(host, fg_color="transparent")
         hide_row.pack(fill="x", padx=8, pady=(2, 2))
         self._grasp_hide_var = ctk.BooleanVar(value=False)
         self._grasp_hide_cb = ctk.CTkCheckBox(
@@ -1133,48 +1195,17 @@ class TeachGraspGui:
         )
         self._region_hide_cb.pack(side="left", padx=(12, 0))
 
-        self._section(body, "이동 속도 (대기 / 집기 / 픽앤플레이스)")
-        self._lin_vel_label = ctk.CTkLabel(
-            body,
-            text=f"XYZ  {self._goto_lin_mps * 1000.0:.0f} mm/s",
-            anchor="w",
-        )
-        self._lin_vel_label.pack(fill="x", padx=8, pady=(0, 0))
-        self._lin_vel_slider = ctk.CTkSlider(
-            body,
-            from_=GOTO_LIN_MIN_MPS * 1000.0,
-            to=GOTO_LIN_MAX_MPS * 1000.0,
-            number_of_steps=int((GOTO_LIN_MAX_MPS - GOTO_LIN_MIN_MPS) * 1000.0),
-            command=self._on_lin_speed,
-        )
-        self._lin_vel_slider.set(self._goto_lin_mps * 1000.0)
-        self._lin_vel_slider.pack(fill="x", padx=8, pady=(4, 4))
-        self._rot_vel_label = ctk.CTkLabel(
-            body,
-            text=f"Rx/Ry/Rz  {self._goto_rot_deg_s:.0f} deg/s",
-            anchor="w",
-        )
-        self._rot_vel_label.pack(fill="x", padx=8, pady=(2, 0))
-        self._rot_vel_slider = ctk.CTkSlider(
-            body,
-            from_=GOTO_ROT_MIN_DEG_S,
-            to=GOTO_ROT_MAX_DEG_S,
-            number_of_steps=int(GOTO_ROT_MAX_DEG_S - GOTO_ROT_MIN_DEG_S),
-            command=self._on_rot_speed,
-        )
-        self._rot_vel_slider.set(self._goto_rot_deg_s)
-        self._rot_vel_slider.pack(fill="x", padx=8, pady=(2, 4))
+        self._panel_labels.append(self._rpy_hint)
 
-        actions = ctk.CTkFrame(root, fg_color="transparent")
+        actions = ctk.CTkFrame(actions_host, fg_color="transparent")
         actions.pack(fill="x", padx=14, pady=(4, 8))
         actions.grid_columnconfigure(0, weight=1)
         actions.grid_columnconfigure(1, weight=1)
-        ctk.CTkButton(actions, text="적용", command=self.apply).grid(
-            row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 6)
-        )
-        ctk.CTkButton(actions, text="물체 초기화", command=self.reset_place).grid(
-            row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 6)
-        )
+        btn_apply = ctk.CTkButton(actions, text="적용", command=self.apply)
+        btn_apply.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 6))
+        btn_reset = ctk.CTkButton(actions, text="물체 초기화", command=self.reset_place)
+        btn_reset.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 6))
+        self._panel_buttons.extend((btn_apply, btn_reset))
         self._btn_pre = ctk.CTkButton(actions, text="대기 위치로", command=self.goto_pre)
         self._btn_grasp = ctk.CTkButton(actions, text="집기 위치로", command=self.goto_grasp)
         self._btn_pre.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(0, 6))
@@ -1184,28 +1215,50 @@ class TeachGraspGui:
             text="픽앤플레이스",
             command=self.start_pick_place,
             height=56,
-            font=ctk.CTkFont(family="Noto Sans CJK KR", size=18),
+            corner_radius=12,
+            font=ui_font(18),
         )
         self._btn_seq.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self._btn_user_seq = ctk.CTkButton(
+            actions,
+            text="픽앤플레이스(유저생성)",
+            command=self.start_user_pick_place,
+            height=56,
+            corner_radius=12,
+            font=ui_font(18),
+        )
+        self._btn_user_seq.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         self._btn_init = ctk.CTkButton(
             actions, text="초기자세로 이동", command=self.snap_init_pose
         )
-        self._btn_init.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self._btn_init.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self._panel_buttons.extend(
+            (
+                self._btn_pre,
+                self._btn_grasp,
+                self._btn_seq,
+                self._btn_user_seq,
+                self._btn_init,
+            )
+        )
         # 픽앤플레이스: motion/pick_place.py 시퀀스.
         if self._ctrl is None:
             self._btn_pre.configure(state="disabled")
             self._btn_grasp.configure(state="disabled")
             self._btn_seq.configure(state="disabled")
+            self._btn_user_seq.configure(state="disabled")
             self._btn_init.configure(state="disabled")
 
-        rand_row = ctk.CTkFrame(root, fg_color="transparent")
+        rand_row = ctk.CTkFrame(actions_host, fg_color="transparent")
         rand_row.pack(fill="x", padx=14, pady=(0, 2))
-        ctk.CTkButton(
+        btn_rand = ctk.CTkButton(
             rand_row,
             text="물체 랜덤 생성",
             width=140,
             command=self.randomize_place,
-        ).pack(side="left")
+        )
+        btn_rand.pack(side="left")
+        self._panel_buttons.append(btn_rand)
         self._warn_label = ctk.CTkLabel(
             rand_row,
             text="",
@@ -1214,7 +1267,7 @@ class TeachGraspGui:
         )
         self._warn_label.pack(side="left", padx=(12, 0), fill="x", expand=True)
 
-        mode_row = ctk.CTkFrame(root, fg_color="transparent")
+        mode_row = ctk.CTkFrame(actions_host, fg_color="transparent")
         mode_row.pack(fill="x", padx=14, pady=(0, 6))
         mode_specs = (
             ("stand", "세우기"),
@@ -1232,21 +1285,12 @@ class TeachGraspGui:
                 checkbox_width=18,
                 checkbox_height=18,
             )
-            cb.pack(side="left", padx=(0, 14))
+            cb.pack(side="left", padx=(0, 8))
             self._rand_mode_vars[key] = var
+            self._mode_cbs.append(cb)
 
-        foot = ctk.CTkFrame(root, fg_color="transparent")
+        foot = ctk.CTkFrame(actions_host, fg_color="transparent")
         foot.pack(fill="x", padx=14, pady=(0, 4))
-        lx, ly, lz = self._cad_maxs_mm - self._cad_mins_mm
-        ctk.CTkLabel(
-            foot,
-            text=(
-                f"pre=L+d 또는 ±N·d · grasp=pre−a  "
-                f"lx={lx:.1f} ly={ly:.1f} lz={lz:.1f} mm"
-            ),
-            anchor="w",
-            text_color="#9ca3af",
-        ).pack(fill="x", pady=(0, 2))
         self._row(foot, "approach_d", f"{approach_d0:.1f}", "d mm (pre)")
         self._row(foot, "approach_a", f"{approach_a0:.1f}", "a mm (grasp)")
         self.entries["approach_d"].bind("<FocusOut>", lambda _e: self._schedule_live_apply())
@@ -1254,22 +1298,69 @@ class TeachGraspGui:
         self.entries["approach_a"].bind("<FocusOut>", lambda _e: self._schedule_live_apply())
         self.entries["approach_a"].bind("<Return>", lambda _e: self._schedule_live_apply())
 
-        self._status = ctk.CTkLabel(root, text="", anchor="w")
-        self._status.pack(fill="x", padx=14, pady=(0, 14))
+        self._status = ctk.CTkLabel(actions_host, text="", anchor="w")
+        self._status.pack(fill="x", padx=14, pady=(0, 6))
+        btn_load = ctk.CTkButton(
+            actions_host,
+            text="물체 위치 불러오기",
+            command=self.load_registered_place,
+            fg_color="#86EFAC",
+            hover_color="#4ADE80",
+            text_color="#14532D",
+        )
+        btn_load.pack(fill="x", padx=14, pady=(0, 14))
+        self._panel_buttons.append(btn_load)
 
-        root.bind("<Return>", lambda _e: self.apply())
+        if self._embedded and not self._panel_enabled:
+            self._lock_place_panel()
+            return
+
+        if not self._embedded:
+            root.bind("<Return>", lambda _e: self.apply())
         self._draw_static(vertices_m, faces)
         self.apply()
         # Color pre sphere while TCP moves; pendant owns display(q) when not drive_viz.
         if self._ctrl is not None:
             self._schedule_display()
 
+    def _xyz_jog_frame_bar(self, parent):
+        """TCP 패널의 XYZ jog frame 과 같은 자리. 숫자는 그대로 둔다."""
+        import customtkinter as ctk
+
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
+        bar.pack(fill="x", padx=6, pady=(0, 2))
+        lab = ctk.CTkLabel(bar, text="XYZ jog frame", width=200, anchor="w")
+        lab.pack(side="left", padx=(4, 2))
+        self._panel_labels.append(lab)
+        seg = ctk.CTkSegmentedButton(
+            bar,
+            values=["base", "TCP"],
+            command=self._on_place_xyz_frame,
+            width=148,
+        )
+        seg.set("base")
+        seg.pack(side="left", padx=(8, 4))
+        return seg
+
+    def _on_place_xyz_frame(self, value: str) -> None:
+        if self._embedded and not self._panel_enabled:
+            return
+        self._place_xyz_frame = "tcp" if str(value) == "TCP" else "base"
+
+    def _axis_row(self, parent):
+        """TCP `_cart_row` 와 같은 프레임. 높이는 조그 버튼(32)에 맞춘다."""
+        import customtkinter as ctk
+
+        row = ctk.CTkFrame(parent)
+        row.pack(fill="x", pady=3, padx=6)
+        return row
+
     def _section(self, parent, title: str) -> None:
         import customtkinter as ctk
 
-        ctk.CTkLabel(parent, text=title, anchor="w", font=ctk.CTkFont(size=15, weight="bold")).pack(
-            fill="x", padx=8, pady=(8, 2)
-        )
+        lab = ctk.CTkLabel(parent, text=title, anchor="w", font=ui_font(15, "bold"))
+        lab.pack(fill="x", padx=8, pady=(8, 2))
+        self._panel_labels.append(lab)
 
     def _grasp_section_hidden(self) -> bool:
         var = getattr(self, "_grasp_hide_var", None)
@@ -1312,23 +1403,6 @@ class TeachGraspGui:
             closed=True,
         )
 
-    def _sync_goto_speed(self) -> None:
-        if self._pp_runner is not None:
-            self._pp_runner.lin_mps = float(self._goto_lin_mps)
-            self._pp_runner.rot_deg_s = float(self._goto_rot_deg_s)
-
-    def _on_lin_speed(self, value: float) -> None:
-        self._goto_lin_mps = float(value) / 1000.0
-        if self._lin_vel_label is not None:
-            self._lin_vel_label.configure(text=f"XYZ  {self._goto_lin_mps * 1000.0:.0f} mm/s")
-        self._sync_goto_speed()
-
-    def _on_rot_speed(self, value: float) -> None:
-        self._goto_rot_deg_s = float(value)
-        if self._rot_vel_label is not None:
-            self._rot_vel_label.configure(text=f"Rx/Ry/Rz  {self._goto_rot_deg_s:.0f} deg/s")
-        self._sync_goto_speed()
-
     def _xyzrpy_block(
         self,
         parent,
@@ -1357,7 +1431,9 @@ class TeachGraspGui:
 
         row = ctk.CTkFrame(parent)
         row.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
+        lab = ctk.CTkLabel(row, text=label, width=110, anchor="w")
+        lab.pack(side="left")
+        self._panel_labels.append(lab)
         ent = ctk.CTkEntry(row, width=140)
         ent.insert(0, value)
         ent.pack(side="left", padx=6)
@@ -1374,10 +1450,11 @@ class TeachGraspGui:
         import customtkinter as ctk
 
         lo, hi = self._slider_limits(key)
-        row = ctk.CTkFrame(parent)
-        row.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
-        ent = ctk.CTkEntry(row, width=70)
+        row = self._axis_row(parent)
+        lab = ctk.CTkLabel(row, text=label, width=110, anchor="w")
+        lab.pack(side="left")
+        self._panel_labels.append(lab)
+        ent = ctk.CTkEntry(row, width=72, height=32)
         ent.insert(0, f"{value:.1f}")
         ent.pack(side="left", padx=(6, 4))
         steps = max(int(round(hi - lo)), 1)
@@ -1402,10 +1479,11 @@ class TeachGraspGui:
     def _rpy_row(self, parent, key: str, value: float, label: str) -> None:
         import customtkinter as ctk
 
-        row = ctk.CTkFrame(parent)
-        row.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
-        ent = ctk.CTkEntry(row, width=70)
+        row = self._axis_row(parent)
+        lab = ctk.CTkLabel(row, text=label, width=110, anchor="w")
+        lab.pack(side="left")
+        self._panel_labels.append(lab)
+        ent = ctk.CTkEntry(row, width=72, height=32)
         ent.insert(0, f"{value:.1f}")
         ent.pack(side="left", padx=(6, 4))
         slider = ctk.CTkSlider(
@@ -1456,61 +1534,34 @@ class TeachGraspGui:
             self._rpy_sync = False
         self._schedule_live_apply()
 
-    def _place_base_rpy_row(self, parent, axis: str, value: float, label: str) -> None:
-        import customtkinter as ctk
+    def _place_rpy_shown(self) -> dict[str, float]:
+        """현재 버튼 표기로 푼 Rx/Ry/Rz."""
+        if self._place_rpy_frame == "base":
+            rpy = self._place_rpy_prev
+            return {"roll": float(rpy[0]), "pitch": float(rpy[1]), "yaw": float(rpy[2])}
+        roll, pitch, yaw = rpy_extrinsic_to_body_xyz(self._place_rpy_prev)
+        return {"roll": float(roll), "pitch": float(pitch), "yaw": float(yaw)}
 
-        row = ctk.CTkFrame(parent)
-        row.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
-        ent = ctk.CTkEntry(row, width=90)
-        ent.insert(0, f"{value:.1f}")
-        ent.pack(side="left", padx=6)
-        self._place_base_entries[axis] = ent
-        ent.bind("<FocusOut>", lambda _e, a=axis: self._on_place_base_entry(a))
-        ent.bind("<Return>", lambda _e, a=axis: self._on_place_base_entry(a))
+    def _update_rpy_hint(self) -> None:
+        if self._place_rpy_frame == "base":
+            text = "슬라이더 = 베이스 고정축 회전. 숫자는 저장되는 베이스 각."
+        else:
+            text = "슬라이더 = 물체에 붙은 축 회전. Rz만 돌리면 Rz 숫자만 바뀌는 건 정상."
+        self._rpy_hint.configure(text=text)
 
-    def _sync_place_base_rpy_ui(self) -> None:
-        """베이스 RPY 칸 ← _place_rpy_prev."""
-        if not getattr(self, "_place_base_entries", None):
+    def _on_place_rpy_frame(self, value: str) -> None:
+        if self._embedded and not self._panel_enabled:
             return
-        vals = {
-            "roll": float(self._place_rpy_prev[0]),
-            "pitch": float(self._place_rpy_prev[1]),
-            "yaw": float(self._place_rpy_prev[2]),
-        }
-        self._rpy_sync = True
-        try:
-            for axis, val in vals.items():
-                ent = self._place_base_entries.get(axis)
-                if ent is None:
-                    continue
-                ent.delete(0, "end")
-                ent.insert(0, f"{val:.1f}")
-        finally:
-            self._rpy_sync = False
-
-    def _on_place_base_entry(self, axis: str) -> None:
-        """베이스 칸 절대 입력 → extrinsic 저장 후 물체 축 UI 동기화."""
-        if self._rpy_sync or axis not in self._place_base_entries:
+        frame = "base" if str(value) == "base" else "body"
+        if frame == self._place_rpy_frame:
             return
-        try:
-            val = float(self._place_base_entries[axis].get().strip())
-        except ValueError:
-            return
-        val = float(np.clip(val, RPY_SLIDER_MIN, RPY_SLIDER_MAX))
-        idx = {"roll": 0, "pitch": 1, "yaw": 2}[axis]
-        cur = list(self._place_rpy_prev)
-        cur[idx] = val
-        self._place_rpy_prev = canonicalize_extrinsic_rpy(
-            (float(cur[0]), float(cur[1]), float(cur[2]))
-        )
+        self._place_rpy_frame = frame
         self._sync_place_rpy_ui()
-        self._schedule_live_apply()
+        self._update_rpy_hint()
 
     def _sync_place_rpy_ui(self, *, keep_axis: str | None = None) -> None:
-        """물체축 칸·슬라이더 + 베이스 칸 동기화. 드래그 축은 재분해로 덮지 않음."""
-        br, bp, by = rpy_extrinsic_to_body_xyz(self._place_rpy_prev)
-        extracted = {"roll": float(br), "pitch": float(bp), "yaw": float(by)}
+        """보이는 칸을 현재 표기로 맞춘다. 드래그 중인 축 슬라이더는 유지."""
+        extracted = self._place_rpy_shown()
         self._rpy_sync = True
         try:
             for axis, val in extracted.items():
@@ -1526,25 +1577,24 @@ class TeachGraspGui:
                     self.sliders[key].set(float(np.clip(val, lo, hi)))
         finally:
             self._rpy_sync = False
-        self._sync_place_base_rpy_ui()
 
     def _nudge_place_rpy(
         self, axis: str, new_axis_val: float, *, absolute: bool = False
     ) -> None:
-        """Rx/Ry/Rz 조작. xyz(물체 원점)는 절대 건드리지 않는다.
-
-        UI 숫자는 물체축 RPY. 내부·yaml 적용은 베이스 extrinsic.
-        슬라이더: 물체 축 증분 R_new = R @ exp(Δ·e_axis).
-        엔트리: 물체축 절대값 → extrinsic 변환.
-        """
+        """Rx/Ry/Rz 조작. xyz(물체 원점)는 건드리지 않는다. 저장은 베이스 각."""
         axis = {"roll": "roll", "pitch": "pitch", "yaw": "yaw"}[axis]
         new_axis_val = float(new_axis_val)
         if absolute:
             cmd = dict(self._place_slider_cmd)
             cmd[axis] = new_axis_val
-            self._place_rpy_prev = rpy_body_xyz_to_extrinsic(
-                float(cmd["roll"]), float(cmd["pitch"]), float(cmd["yaw"])
-            )
+            if self._place_rpy_frame == "base":
+                self._place_rpy_prev = canonicalize_extrinsic_rpy(
+                    (float(cmd["roll"]), float(cmd["pitch"]), float(cmd["yaw"]))
+                )
+            else:
+                self._place_rpy_prev = rpy_body_xyz_to_extrinsic(
+                    float(cmd["roll"]), float(cmd["pitch"]), float(cmd["yaw"])
+                )
             self._place_slider_cmd = cmd
             self._sync_place_rpy_ui()
         else:
@@ -1554,9 +1604,14 @@ class TeachGraspGui:
                 delta -= 360.0
             elif delta < -180.0:
                 delta += 360.0
-            self._place_rpy_prev = place_rpy_body_delta(
-                self._place_rpy_prev, axis=axis, delta_deg=delta
-            )
+            if self._place_rpy_frame == "base":
+                self._place_rpy_prev = place_rpy_base_delta(
+                    self._place_rpy_prev, axis=axis, delta_deg=delta
+                )
+            else:
+                self._place_rpy_prev = place_rpy_body_delta(
+                    self._place_rpy_prev, axis=axis, delta_deg=delta
+                )
             self._place_slider_cmd[axis] = new_axis_val
             self._sync_place_rpy_ui(keep_axis=axis)
         self._schedule_live_apply()
@@ -1615,10 +1670,16 @@ class TeachGraspGui:
         except Exception:
             pass
 
-    def _set_status(self, text: str, *, error: bool = False) -> None:
+    def _set_status(self, text: str, *, error: bool = False, info: bool = False) -> None:
         if self._status is None:
             return
-        self._status.configure(text=text, text_color="#f87171" if error else "#86efac")
+        if error:
+            color = "#f87171"
+        elif info:
+            color = "#e5e7eb"
+        else:
+            color = "#86efac"
+        self._status.configure(text=text, text_color=color)
 
     def _read_float(self, key: str) -> float:
         return float(self.entries[key].get().strip())
@@ -1651,25 +1712,20 @@ class TeachGraspGui:
                 self._rpy_sync = False
 
     def _fill_place(self, place: PlacePose) -> None:
-        # 내부=베이스 extrinsic(정규화), 위 UI=물체축, 아래 UI=베이스.
+        # 내부=베이스 extrinsic. 칸 숫자는 현재 물체 축/베이스 표기.
         self._place_rpy_prev = canonicalize_extrinsic_rpy(place.rpy_deg)
-        body_rpy = rpy_extrinsic_to_body_xyz(self._place_rpy_prev)
-        self._place_slider_cmd = {
-            "roll": float(body_rpy[0]),
-            "pitch": float(body_rpy[1]),
-            "yaw": float(body_rpy[2]),
-        }
+        shown = self._place_rpy_shown()
+        self._place_slider_cmd = dict(shown)
         mapping = {
             "place_x": place.xyz_mm[0],
             "place_y": place.xyz_mm[1],
             "place_z": place.xyz_mm[2],
-            "place_roll": body_rpy[0],
-            "place_pitch": body_rpy[1],
-            "place_yaw": body_rpy[2],
+            "place_roll": shown["roll"],
+            "place_pitch": shown["pitch"],
+            "place_yaw": shown["yaw"],
         }
         for key, val in mapping.items():
             self._set_entry(key, val)
-        self._sync_place_base_rpy_ui()
 
     def _fill_grasp(self, grasp: GraspSpec) -> None:
         self._grasp_spec = grasp
@@ -1700,8 +1756,31 @@ class TeachGraspGui:
         joints[GRIPPER_JOINT] = grip_100_to_user(gripper_100)
         self._viz.display(self._kin.q_from_deg(joints))
 
+    def _lock_place_panel(self) -> None:
+        gray = "#6b7280"
+        for lab in self._panel_labels:
+            try:
+                lab.configure(text_color=gray)
+            except Exception:
+                pass
+        for ent in self.entries.values():
+            ent.configure(text_color=gray, state="disabled")
+        for slider in self.sliders.values():
+            slider.configure(state="disabled")
+        self._place_rpy_seg.configure(state="disabled")
+        self._place_xyz_seg.configure(state="disabled")
+        for cb in (self._grasp_hide_cb, self._region_hide_cb, *self._mode_cbs):
+            cb.configure(state="disabled", text_color_disabled=gray)
+        for btn in self._panel_buttons:
+            btn.configure(state="disabled")
+
     def _schedule_display(self) -> None:
         if self._ctrl is None:
+            return
+        try:
+            if not int(self.root.winfo_exists()):
+                return
+        except Exception:
             return
         st = self._ctrl.snapshot()
         if self._drive_viz:
@@ -1752,11 +1831,11 @@ class TeachGraspGui:
         try:
             d_mm = self._read_float("approach_d")
         except (KeyError, ValueError):
-            d_mm = DEFAULT_APPROACH_D_MM
+            d_mm = self._approach_d_mm
         try:
             a_mm = self._read_float("approach_a")
         except (KeyError, ValueError):
-            a_mm = DEFAULT_APPROACH_A_MM
+            a_mm = self._approach_a_mm
         return float(d_mm), float(a_mm)
 
     def _compute_auto(self, place: PlacePose) -> AutoPreResult:
@@ -1779,7 +1858,104 @@ class TeachGraspGui:
             q=q,
         )
 
+    def _cancel_register_poll(self) -> None:
+        if self._reg_after is None:
+            return
+        try:
+            self.root.after_cancel(self._reg_after)
+        except Exception:
+            pass
+        self._reg_after = None
+
+    def load_registered_place(self) -> None:
+        """카메라 창에 c 와 같은 전체 등록을 요청하고, 끝난 자세만 칸에 넣는다."""
+        if self._embedded and not self._panel_enabled:
+            return
+        self._cancel_register_poll()
+        req_id = uuid.uuid4().hex
+        self._reg_req_id = req_id
+        now = time.monotonic()
+        self._reg_ack_deadline = now + REG_ACK_S
+        self._reg_job_deadline = now + REG_JOB_S
+        self._reg_accepted = False
+        try:
+            REGISTER_REQUEST_JSON.parent.mkdir(parents=True, exist_ok=True)
+            tmp = REGISTER_REQUEST_JSON.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"id": req_id}), encoding="utf-8")
+            tmp.replace(REGISTER_REQUEST_JSON)
+        except OSError:
+            self._set_status(_REG_NO_REPLY, error=True)
+            return
+        self._set_status(_REG_RUN, info=True)
+        self._reg_after = self.root.after(REG_POLL_MS, self._poll_register)
+
+    def _poll_register(self) -> None:
+        self._reg_after = None
+        try:
+            if not int(self.root.winfo_exists()):
+                return
+        except Exception:
+            return
+        req_id = self._reg_req_id
+        if not req_id:
+            return
+        now = time.monotonic()
+        data = None
+        try:
+            data = json.loads(REGISTER_STATUS_JSON.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict) and data.get("id") == req_id:
+            state = str(data.get("state") or "")
+            if state == "run":
+                self._reg_accepted = True
+                self._set_status(_REG_RUN, info=True)
+            elif state == "busy":
+                self._set_status(_REG_RUN, info=True)
+                return
+            elif state == "no_box":
+                self._set_status(_REG_NO_BOX, error=True)
+                return
+            elif state == "fail":
+                self._set_status(_REG_FAIL, error=True)
+                return
+            elif state == "ok":
+                place = self._place_from_register(data)
+                if place is None:
+                    self._set_status(_REG_FAIL, error=True)
+                    return
+                self._fill_place(place)
+                self.apply()
+                self._set_status(
+                    f"불러옴  xyz=({place.xyz_mm[0]:.1f}, {place.xyz_mm[1]:.1f}, {place.xyz_mm[2]:.1f})"
+                )
+                return
+        if not self._reg_accepted and now >= self._reg_ack_deadline:
+            self._set_status(_REG_NO_REPLY, error=True)
+            return
+        if self._reg_accepted and now >= self._reg_job_deadline:
+            self._set_status(_REG_NO_REPLY, error=True)
+            return
+        self._reg_after = self.root.after(REG_POLL_MS, self._poll_register)
+
+    def _place_from_register(self, data: dict) -> PlacePose | None:
+        xyz = data.get("xyz_mm")
+        rpy = data.get("rpy_deg")
+        if not isinstance(xyz, list) or not isinstance(rpy, list):
+            return None
+        if len(xyz) < 3 or len(rpy) < 3:
+            return None
+        try:
+            return PlacePose(
+                xyz_mm=(float(xyz[0]), float(xyz[1]), float(xyz[2])),
+                rpy_deg=(float(rpy[0]), float(rpy[1]), float(rpy[2])),
+            )
+        except (TypeError, ValueError):
+            return None
+
     def apply(self) -> None:
+        if self._embedded and not self._panel_enabled:
+            return
         try:
             place, grasp = self._read_place_grasp()
         except ValueError as exc:
@@ -1829,14 +2005,6 @@ class TeachGraspGui:
             )
         if self._own_robot:
             self._show_robot(grasp.gripper)
-        flip_txt = "pitch−" if auto.pitch_flipped else "pitch+"
-        form_txt = f" {auto.form}" if auto.form else ""
-        align = place_axis_alignment_text(place.rpy_deg)
-        self._set_status(
-            f"적용  xyz={list(np.round(place.xyz_mm, 1))}  "
-            f"축(베이스) {align}  "
-            f"axis={auto.axis_name}{form_txt} {flip_txt}  d={d_mm:.1f} a={a_mm:.1f}"
-        )
 
     def _set_collision_warn(self, text: str) -> None:
         self._collision_warn = bool(text)
@@ -1933,16 +2101,11 @@ class TeachGraspGui:
             return 0.0
         self.apply()
         xyz_mm, rpy_deg = T_to_xyzrpy(T)
-        duration_s = self._ctrl.start_ee_goto(
-            xyz_mm,
-            rpy_deg,
-            lin_mps=self._goto_lin_mps,
-            rot_deg_s=self._goto_rot_deg_s,
-        )
+        duration_s = self._ctrl.start_ee_goto(xyz_mm, rpy_deg)
         self._set_status(
             f"{label} 이동  xyz=[{xyz_mm[0]:.1f}, {xyz_mm[1]:.1f}, {xyz_mm[2]:.1f}]  "
             f"rpy=[{rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}]  "
-            f"({duration_s:.1f}s @ {self._goto_lin_mps*1000:.0f}mm/s, {self._goto_rot_deg_s:.0f}°/s)"
+            f"({duration_s:.1f}s)"
         )
         return float(duration_s)
 
@@ -1979,6 +2142,9 @@ class TeachGraspGui:
     def start_pick_place(self) -> None:
         if self._ctrl is None or self._pp_runner is None:
             self._set_status("컨트롤러 없음. python pendant/main.py --grasp", error=True)
+            return
+        if self._user_pick_running():
+            self._set_status("픽앤플레이스(유저생성) 실행 중", error=True)
             return
         if self._pp_runner.busy():
             self._set_status("픽앤플레이스 이미 실행 중", error=True)
@@ -2022,6 +2188,54 @@ class TeachGraspGui:
         if phase == "fault":
             self._set_status(f"픽앤플레이스 실패: {runner.status}", error=True)
 
+    def _user_pick_running(self) -> bool:
+        thread = self._user_pp_thread
+        return thread is not None and thread.is_alive()
+
+    def start_user_pick_place(self) -> None:
+        if self._ctrl is None:
+            self._set_status("컨트롤러 없음. python pendant/main.py --grasp", error=True)
+            return
+        if self._user_pick_running():
+            self._set_status("픽앤플레이스(유저생성) 이미 실행 중", error=True)
+            return
+        if self._pp_runner is not None and self._pp_runner.busy():
+            self._set_status("픽앤플레이스 실행 중", error=True)
+            return
+        self._user_pp_thread = threading.Thread(
+            target=self._user_pick_worker, name="user-pick-place", daemon=True
+        )
+        self._user_pp_thread.start()
+        self._set_status("픽앤플레이스(유저생성) 실행")
+
+    def abort_user_pick_place(self) -> None:
+        if not self._user_pick_running() or self._ctrl is None:
+            return
+        self._ctrl.stop_all()
+
+    def _user_pick_worker(self) -> None:
+        try:
+            run = _load_user_pick_run()
+            from motion.arm import Arm
+
+            run(Arm.attach(self._ctrl))
+        except Exception as exc:
+            self._post_status(f"픽앤플레이스(유저생성) 실패: {exc}", error=True)
+        else:
+            self._post_status("픽앤플레이스(유저생성) 완료")
+
+    def _post_status(self, text: str, *, error: bool = False) -> None:
+        def apply() -> None:
+            try:
+                self._set_status(text, error=error)
+            except Exception:
+                pass
+
+        try:
+            self.root.after(0, apply)
+        except Exception:
+            pass
+
     def snap_init_pose(self) -> None:
         if self._ctrl is None:
             self._set_status("컨트롤러 없음. python pendant/main.py --grasp", error=True)
@@ -2035,6 +2249,7 @@ class TeachGraspGui:
             self._set_status("초기자세 이동 실패 (E-stop/충돌 등)", error=True)
 
     def on_close(self) -> None:
+        self.abort_user_pick_place()
         if self._pp_runner is not None and self._pp_runner.busy():
             self._pp_runner.abort("창 닫힘")
         if self._pp_after is not None:
@@ -2049,7 +2264,52 @@ class TeachGraspGui:
             except Exception:
                 pass
             self._replay_after = None
+        self._cancel_register_poll()
         self.root.destroy()
+
+
+def attach_teach_panel(
+    parent,
+    visualizer,
+    *,
+    meshcat_url: str,
+    controller=None,
+    enabled: bool = False,
+    actions_parent=None,
+) -> TeachGraspGui | None:
+    """로봇 펜던트 열에 사물 위치 블록을 붙인다. enabled 가 아니면 표시만 하고 잠근다."""
+    try:
+        mesh_path = cad_mesh_path()
+        vertices_m, faces = load_cad_mesh_m(mesh_path)
+    except Exception as exc:
+        print(f"사물 위치 패널: CAD 로드 실패 ({exc})")
+        if enabled:
+            return None
+        mesh_path = Path("cad")
+        vertices_m = np.zeros((1, 3))
+        faces = np.zeros((0, 3), dtype=np.uint32)
+    try:
+        place, grasp = load_specs(CAD_YAML)
+    except Exception as exc:
+        print(f"사물 위치 패널: yaml 로드 실패 ({exc})")
+        return None
+    return TeachGraspGui(
+        parent,
+        visualizer=visualizer,
+        mesh_path=mesh_path,
+        vertices_m=vertices_m,
+        faces=faces,
+        place=place,
+        grasp=grasp,
+        meshcat_url=meshcat_url,
+        kinematics=getattr(controller, "_kin", None) if controller is not None else None,
+        controller=controller,
+        own_robot=False,
+        drive_viz=False,
+        embedded=True,
+        enabled=enabled,
+        actions_parent=actions_parent,
+    )
 
 
 def attach_teach_window(
@@ -2129,7 +2389,7 @@ def main() -> None:
 
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
-    TeachGraspGui(
+    gui = TeachGraspGui(
         root,
         visualizer=viz,
         kinematics=kin,
@@ -2145,7 +2405,12 @@ def main() -> None:
     )
 
     def _on_close() -> None:
+        gui._cancel_register_poll()
         ctrl.stop()
+        try:
+            viz.close()
+        except Exception:
+            pass
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", _on_close)

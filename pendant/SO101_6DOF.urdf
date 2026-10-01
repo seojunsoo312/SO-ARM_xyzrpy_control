@@ -1,232 +1,307 @@
-<?xml version="1.0" ?>
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SO-101 visuals (meters, scale 1) plus the extra forearm roll.
+     Chain: red base, orange shoulder, yellow upper arm, green bracket, blue rotary,
+     navy bracket, purple wrist roll, purple jaw.
+     Joint names stay S1..S7. S4 rolls about the arm between the two green brackets. -->
 <robot name="SO101_6DOF">
 
-<material name="silver">
-  <color rgba="0.700 0.700 0.700 1.000"/>
-</material>
+  <!-- Temporary: one color per rigid link so chunks are easy to tell apart. -->
+  <material name="chunk_BASE_1">
+    <color rgba="0.90 0.22 0.18 1.0"/>
+  </material>
+  <material name="chunk_L1_1">
+    <color rgba="0.96 0.55 0.12 1.0"/>
+  </material>
+  <material name="chunk_L2_1">
+    <color rgba="0.95 0.88 0.15 1.0"/>
+  </material>
+  <material name="chunk_L3_1">
+    <color rgba="0.18 0.72 0.32 1.0"/>
+  </material>
+  <material name="chunk_L4_1">
+    <color rgba="0.25 0.55 1.00 1.0"/>
+  </material>
+  <material name="chunk_L5_1">
+    <color rgba="0.08 0.16 0.48 1.0"/>
+  </material>
+  <material name="chunk_L6_1">
+    <color rgba="0.70 0.28 0.85 1.0"/>
+  </material>
+  <material name="chunk_L7_1">
+    <color rgba="0.70 0.28 0.85 1.0"/>
+  </material>
 
-<link name="BASE_1">
-  <inertial>
-    <origin xyz="-1.1000864930715867e-06 0.019881184608602016 0.030651327322251322" rpy="0 0 0"/>
-    <mass value="1.4138178700759005"/>
-    <inertia ixx="0.001346" iyy="0.001326" izz="0.001378" ixy="0.0" iyz="-0.000126" ixz="0.0"/>
-  </inertial>
-  <visual>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/BASE_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/BASE_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="BASE_1">
+    <inertial>
+      <origin xyz="-0.000051971 0.0251174 0.0334843" rpy="0 0 -1.5707963"/>
+      <mass value="0.147"/>
+      <inertia ixx="0.000114686" ixy="-4.59787e-07" ixz="4.97151e-06" iyy="0.000136117" iyz="9.75275e-08" izz="0.000130364"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.000099441 0.04520001 -0.0024" rpy="1.5708 0 0"/>
+      <geometry><mesh filename="package://meshes/base_motor_holder_so101_v1.stl"/></geometry>
+      <material name="chunk_BASE_1"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.000099441 0.04520001 -0.0024" rpy="1.5708 0 0"/>
+      <geometry><mesh filename="package://meshes/base_motor_holder_so101_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0.04520001 -0.0024" rpy="1.5708 0 0"/>
+      <geometry><mesh filename="package://meshes/base_so101_v2.stl"/></geometry>
+      <material name="chunk_BASE_1"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0.04520001 -0.0024" rpy="1.5708 0 0"/>
+      <geometry><mesh filename="package://meshes/base_so101_v2.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0.0125 0.0437" rpy="0 0 -1.5707963"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+      <material name="chunk_BASE_1"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0.0125 0.0437" rpy="0 0 -1.5707963"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.000199441 0.069818 0.0474" rpy="1.5708 0 0"/>
+      <geometry><mesh filename="package://meshes/waveshare_mounting_plate_so101_v2.stl"/></geometry>
+      <material name="chunk_BASE_1"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.000199441 0.069818 0.0474" rpy="1.5708 0 0"/>
+      <geometry><mesh filename="package://meshes/waveshare_mounting_plate_so101_v2.stl"/></geometry>
+    </collision>
+  </link>
 
-<link name="L1_1">
-  <inertial>
-    <origin xyz="-0.00016120373189057726 -0.031203643458480076 0.011056990096431046" rpy="0 0 0"/>
-    <mass value="0.9302287393788501"/>
-    <inertia ixx="0.000928" iyy="0.000925" izz="0.000252" ixy="0.0" iyz="2.6e-05" ixz="1e-06"/>
-  </inertial>
-  <visual>
-    <origin xyz="-1.0269904119381793e-05 0.006491919613632658 -0.06469999999999797" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L1_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="-1.0269904119381793e-05 0.006491919613632658 -0.06469999999999797" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L1_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="L1_1">
+    <inertial>
+      <origin xyz="-0.0307604 -1.66727e-05 -0.0252713" rpy="0 0 0"/>
+      <mass value="0.100006"/>
+      <inertia ixx="8.3759e-05" ixy="7.55525e-08" ixz="-1.16342e-06" iyy="8.10403e-05" iyz="1.54663e-07" izz="2.39783e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.0303992 0.000422241 -0.0417" rpy="1.5708 1.5708 0"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+      <material name="chunk_L1_1"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.0303992 0.000422241 -0.0417" rpy="1.5708 1.5708 0"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.0675992 -0.000177759 0.0158499" rpy="1.5708 -1.5708 0"/>
+      <geometry><mesh filename="package://meshes/motor_holder_so101_base_v1.stl"/></geometry>
+      <material name="chunk_L1_1"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.0675992 -0.000177759 0.0158499" rpy="1.5708 -1.5708 0"/>
+      <geometry><mesh filename="package://meshes/motor_holder_so101_base_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.0122008 2.22413e-05 0.0464" rpy="-1.5708 2.35221e-33 0"/>
+      <geometry><mesh filename="package://meshes/rotation_pitch_so101_v1.stl"/></geometry>
+      <material name="chunk_L1_1"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0122008 2.22413e-05 0.0464" rpy="-1.5708 2.35221e-33 0"/>
+      <geometry><mesh filename="package://meshes/rotation_pitch_so101_v1.stl"/></geometry>
+    </collision>
+  </link>
 
-<link name="L2_1">
-  <inertial>
-    <origin xyz="-0.018035774777733427 -0.07019130275920135 -0.0031072786683158937" rpy="0 0 0"/>
-    <mass value="1.2731856908289911"/>
-    <inertia ixx="0.002027" iyy="0.000604" izz="0.002336" ixy="1e-06" iyz="-0.000172" ixz="3e-06"/>
-  </inertial>
-  <visual>
-    <origin xyz="-0.017943099150266685 0.036977762018863505 -0.11880177932977297" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L2_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="-0.017943099150266685 0.036977762018863505 -0.11880177932977297" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L2_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="L2_1">
+    <inertial>
+      <origin xyz="-0.0898471 -0.00838224 0.0184089" rpy="0 0 0"/>
+      <mass value="0.103"/>
+      <inertia ixx="4.08002e-05" ixy="-1.97819e-05" ixz="-4.03016e-08" iyy="0.000147318" iyz="8.97326e-09" izz="0.000142487"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.11257 -0.0155 0.0187" rpy="-3.14159 -5.27356e-16 -1.5708"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+      <material name="chunk_L2_1"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.11257 -0.0155 0.0187" rpy="-3.14159 -5.27356e-16 -1.5708"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.065085 0.012 0.0182" rpy="3.14159 0 -1.30911e-30"/>
+      <geometry><mesh filename="package://meshes/upper_arm_so101_v1.stl"/></geometry>
+      <material name="chunk_L2_1"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.065085 0.012 0.0182" rpy="3.14159 0 -1.30911e-30"/>
+      <geometry><mesh filename="package://meshes/upper_arm_so101_v1.stl"/></geometry>
+    </collision>
+  </link>
 
-<link name="L3_1">
-  <inertial>
-    <origin xyz="-0.026440112388001258 -0.03445123321574714 0.00032570809248233523" rpy="0 0 0"/>
-    <mass value="0.5075940741079121"/>
-    <inertia ixx="0.00018" iyy="0.000195" izz="0.000309" ixy="-2.4e-05" iyz="2e-06" ixz="1e-06"/>
-  </inertial>
-  <visual>
-    <origin xyz="-0.018380904386528934 0.14988554549089061 -0.09080177932977146" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L3_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="-0.018380904386528934 0.14988554549089061 -0.09080177932977146" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L3_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="L3_1">
+    <inertial>
+      <origin xyz="-0.0980701 0.00324376 0.0182831" rpy="0 0 0"/>
+      <mass value="0.104"/>
+      <inertia ixx="2.87438e-05" ixy="7.41152e-06" ixz="1.26409e-06" iyy="0.000159844" iyz="-4.90188e-08" izz="0.00014529"/>
+    </inertial>
+    <visual>
+      <origin xyz="8.32667e-17 -0.0424 0.0306" rpy="1.5708 1.5708 0"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_no_horn_v1.stl"/></geometry>
+      <material name="chunk_L3_1"/>
+    </visual>
+    <collision>
+      <origin xyz="8.32667e-17 -0.0424 0.0306" rpy="1.5708 1.5708 0"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_no_horn_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.028 0.0181" rpy="-1.5708 -1.5708 0"/>
+      <geometry><mesh filename="package://meshes/wrist_roll_pitch_so101_v2.stl"/></geometry>
+      <material name="chunk_L3_1"/>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.028 0.0181" rpy="-1.5708 -1.5708 0"/>
+      <geometry><mesh filename="package://meshes/wrist_roll_pitch_so101_v2.stl"/></geometry>
+    </collision>
+  </link>
 
-<link name="L4_1">
-  <inertial>
-    <origin xyz="0.0002996710669403727 -0.04219851350426518 -0.00271190771097167" rpy="0 0 0"/>
-    <mass value="0.6716678130372074"/>
-    <inertia ixx="0.000358" iyy="0.00019" izz="0.000444" ixy="-7e-06" iyz="-2.7e-05" ixz="-1e-06"/>
-  </inertial>
-  <visual>
-    <origin xyz="-0.00038090442527525777 0.20975277414514332 -0.09193455067552131" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L4_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="-0.00038090442527525777 0.20975277414514332 -0.09193455067552131" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L4_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="L4_1">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.04"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.09193455067552131 0.20975277414514332 -0.00038090442527525777" rpy="0 -1.5707963267948966 0"/>
+      <geometry><mesh filename="package://meshes/L4_1.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="chunk_L4_1"/>
+    </visual>
+    <collision>
+      <origin xyz="0.09193455067552131 0.20975277414514332 -0.00038090442527525777" rpy="0 -1.5707963267948966 0"/>
+      <geometry><mesh filename="package://meshes/L4_1.stl" scale="0.001 0.001 0.001"/></geometry>
+    </collision>
+  </link>
 
-<link name="L5_1">
-  <inertial>
-    <origin xyz="0.026440104534337996 -0.03445128614067067 -0.00032095357298489446" rpy="0 0 0"/>
-    <mass value="0.5075938722215222"/>
-    <inertia ixx="0.00018" iyy="0.000195" izz="0.000309" ixy="2.4e-05" iyz="-2e-06" ixz="1e-06"/>
-  </inertial>
-  <visual>
-    <origin xyz="0.017824547028909253 0.28286757457671496 -0.08694842157267686" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L5_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="0.017824547028909253 0.28286757457671496 -0.08694842157267686" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L5_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="L5_1">
+    <inertial>
+      <origin xyz="-0.000103312 -0.0386143 0.0281156" rpy="0 0 0"/>
+      <mass value="0.079"/>
+      <inertia ixx="3.68263e-05" ixy="1.7893e-08" ixz="-5.28128e-08" iyy="2.5391e-05" iyz="3.6412e-06" izz="2.1e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="8.32667e-17 -0.0424 0.0306" rpy="1.5708 1.5708 0"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_no_horn_v1.stl"/></geometry>
+      <material name="chunk_L5_1"/>
+    </visual>
+    <collision>
+      <origin xyz="8.32667e-17 -0.0424 0.0306" rpy="1.5708 1.5708 0"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_no_horn_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.028 0.0181" rpy="-1.5708 -1.5708 0"/>
+      <geometry><mesh filename="package://meshes/wrist_roll_pitch_so101_v2.stl"/></geometry>
+      <material name="chunk_L5_1"/>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.028 0.0181" rpy="-1.5708 -1.5708 0"/>
+      <geometry><mesh filename="package://meshes/wrist_roll_pitch_so101_v2.stl"/></geometry>
+    </collision>
+  </link>
 
-<link name="L6_1">
-  <inertial>
-    <origin xyz="-0.004954058875949912 -0.027803012749780254 0.0002046527997015407" rpy="0 0 0"/>
-    <mass value="0.6955792923870261"/>
-    <inertia ixx="0.000338" iyy="0.000309" izz="0.000466" ixy="-7.3e-05" iyz="-0.0" ixz="-4e-06"/>
-  </inertial>
-  <visual>
-    <origin xyz="-0.00017545301288863222 0.3427349572721379 -0.08582382210508811" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L6_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="-0.00017545301288863222 0.3427349572721379 -0.08582382210508811" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L6_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="L6_1">
+    <inertial>
+      <origin xyz="0.000213627 0.000245138 -0.025187" rpy="0 0 0"/>
+      <mass value="0.087"/>
+      <inertia ixx="2.75087e-05" ixy="-3.35241e-07" ixz="-5.7352e-06" iyy="4.33657e-05" iyz="-5.17847e-08" izz="3.45059e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.0077 0.0001 -0.0234" rpy="-1.5708 -5.19179e-17 -1.66533e-16"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+      <material name="chunk_L6_1"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0077 0.0001 -0.0234" rpy="-1.5708 -5.19179e-17 -1.66533e-16"/>
+      <geometry><mesh filename="package://meshes/sts3215_03a_v1.stl"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="8.32667e-17 -0.000218214 0.000949706" rpy="-3.14159 -5.55112e-17 0"/>
+      <geometry><mesh filename="package://meshes/wrist_roll_follower_so101_v1.stl"/></geometry>
+      <material name="chunk_L6_1"/>
+    </visual>
+    <collision>
+      <origin xyz="8.32667e-17 -0.000218214 0.000949706" rpy="-3.14159 -5.55112e-17 0"/>
+      <geometry><mesh filename="package://meshes/wrist_roll_follower_so101_v1.stl"/></geometry>
+    </collision>
+  </link>
 
-<link name="L7_1">
-  <inertial>
-    <origin xyz="-0.0016198436295189536 -0.030393188436600826 0.019288497752840195" rpy="0 0 0"/>
-    <mass value="0.1586832108582172"/>
-    <inertia ixx="8.7e-05" iyy="2.4e-05" izz="7e-05" ixy="-4e-06" iyz="-2e-06" ixz="-0.0"/>
-  </inertial>
-  <visual>
-    <origin xyz="-0.020375453052695593 0.36777475192005477 -0.06901473991052347" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L7_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-    <material name="silver"/>
-  </visual>
-  <collision>
-    <origin xyz="-0.020375453052695593 0.36777475192005477 -0.06901473991052347" rpy="0 0 0"/>
-    <geometry>
-      <mesh filename="package://meshes/L7_1.stl" scale="0.001 0.001 0.001"/>
-    </geometry>
-  </collision>
-</link>
+  <link name="L7_1">
+    <inertial>
+      <origin xyz="-0.00157495 -0.0300244 0.0192755" rpy="0 0 0"/>
+      <mass value="0.012"/>
+      <inertia ixx="6.61427e-06" ixy="-3.19807e-07" ixz="-5.90717e-09" iyy="1.89032e-06" iyz="-1.09945e-07" izz="5.28738e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="-5.55112e-17 -5.55112e-17 0.0189" rpy="9.53145e-17 6.93889e-18 1.24077e-24"/>
+      <geometry><mesh filename="package://meshes/moving_jaw_so101_v1.stl"/></geometry>
+      <material name="chunk_L7_1"/>
+    </visual>
+    <collision>
+      <origin xyz="-5.55112e-17 -5.55112e-17 0.0189" rpy="9.53145e-17 6.93889e-18 1.24077e-24"/>
+      <geometry><mesh filename="package://meshes/moving_jaw_so101_v1.stl"/></geometry>
+    </collision>
+  </link>
 
-<joint name="S1" type="revolute">
-  <origin xyz="1.0269904119381793e-05 -0.006491919613632658 0.06469999999999797" rpy="0 0 0"/>
-  <parent link="BASE_1"/>
-  <child link="L1_1"/>
-  <axis xyz="0.0 0.0 1.0"/>
-  <limit upper="3.14159" lower="-3.14159" effort="100" velocity="100"/>
-</joint>
+  <joint name="S1" type="revolute">
+    <origin xyz="0 0 0.0624" rpy="3.14159 4.18253e-17 -3.14159"/>
+    <parent link="BASE_1"/>
+    <child link="L1_1"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-1.91986" upper="1.91986"/>
+  </joint>
 
-<joint name="S2" type="revolute">
-  <origin xyz="0.017932829246147305 -0.030485842405230848 0.054101779329775" rpy="0 0 0"/>
-  <parent link="L1_1"/>
-  <child link="L2_1"/>
-  <axis xyz="1.0 3.899658373995775e-15 9.973680369662098e-15"/>
-  <limit upper="3.14159" lower="-3.14159" effort="100" velocity="100"/>
-</joint>
+  <joint name="S2" type="revolute">
+    <origin xyz="-0.0303992 -0.0182778 -0.0542" rpy="-1.5708 -1.5708 0"/>
+    <parent link="L1_1"/>
+    <child link="L2_1"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-1.74533" upper="1.74533"/>
+  </joint>
 
-<joint name="S3" type="revolute">
-  <origin xyz="0.0004378052362622488 -0.11290778347202711 -0.02800000000000151" rpy="0 0 0"/>
-  <parent link="L2_1"/>
-  <child link="L3_1"/>
-  <axis xyz="1.0 4.315992008230064e-15 1.3031262354691917e-14"/>
-  <limit upper="3.14159" lower="-3.14159" effort="100" velocity="100"/>
-</joint>
+  <joint name="S3" type="revolute">
+    <origin xyz="-0.11257 -0.028 0" rpy="0 0 0"/>
+    <parent link="L2_1"/>
+    <child link="L3_1"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-1.69" upper="1.69"/>
+  </joint>
 
-<joint name="S4" type="revolute">
-  <origin xyz="-0.017999999961253677 -0.0598672286542527 0.00113277134574985" rpy="0 0 0"/>
-  <parent link="L3_1"/>
-  <child link="L4_1"/>
-  <axis xyz="6.661013685071851e-10 -1.0 -8.495972595381182e-16"/>
-  <limit upper="3.14159" lower="-3.14159" effort="100" velocity="100"/>
-</joint>
+  <joint name="S4" type="revolute">
+    <origin xyz="0 -0.0611 0.0181" rpy="0 0 0"/>
+    <parent link="L3_1"/>
+    <child link="L4_1"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="10" velocity="10" lower="-3.14159" upper="3.14159"/>
+  </joint>
 
-<joint name="S5" type="revolute">
-  <origin xyz="-0.01820545145418451 -0.07311480043157165 -0.004986129102844447" rpy="0 0 0"/>
-  <parent link="L4_1"/>
-  <child link="L5_1"/>
-  <axis xyz="-1.0 -1.333394269997649e-09 -6.661193142758406e-10"/>
-  <limit upper="3.14159" lower="-3.14159" effort="100" velocity="100"/>
-</joint>
+  <joint name="S5" type="revolute">
+    <origin xyz="0.004986129102844447 -0.07311480043157165 -0.01820545145418451" rpy="0 0 0"/>
+    <parent link="L4_1"/>
+    <child link="L5_1"/>
+    <axis xyz="0 0 -1"/>
+    <limit effort="10" velocity="10" lower="-1.65806" upper="1.65806"/>
+  </joint>
 
-<joint name="S6" type="revolute">
-  <origin xyz="0.018000000041797887 -0.05986738269542291 -0.0011245994675887494" rpy="0 0 0"/>
-  <parent link="L5_1"/>
-  <child link="L6_1"/>
-  <axis xyz="6.666111507521254e-10 -0.9999999906839232 0.0001364996476153662"/>
-  <limit upper="3.14159" lower="-3.14159" effort="100" velocity="100"/>
-</joint>
+  <joint name="S6" type="revolute">
+    <origin xyz="5.55112e-17 -0.0611 0.0181" rpy="1.5708 0.0486795 3.14159"/>
+    <parent link="L5_1"/>
+    <child link="L6_1"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-2.74385" upper="2.84121"/>
+  </joint>
 
-<joint name="S7" type="revolute">
-  <origin xyz="0.02020000003980696 -0.02503979464791689 -0.016809082194564645" rpy="0 0 0"/>
-  <parent link="L6_1"/>
-  <child link="L7_1"/>
-  <axis xyz="1.6654672358491272e-09 -0.00013649965749629398 -0.9999999906839215"/>
-  <limit upper="3.14159" lower="-3.14159" effort="100" velocity="100"/>
-</joint>
+  <joint name="S7" type="revolute">
+    <origin xyz="0.0202 0.0188 -0.0234" rpy="1.5708 -5.24284e-08 -1.41553e-15"/>
+    <parent link="L6_1"/>
+    <child link="L7_1"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-0.174533" upper="1.74533"/>
+  </joint>
 
 </robot>

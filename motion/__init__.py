@@ -28,6 +28,7 @@ from motion.hw_controller import (
     grip_user_to_100,
 )
 from motion.arm import Arm, ArmError
+from motion.pick_targets import PickTargets, load_pick_targets
 from motion.pose_server import POSE_URL, PoseServer, fetch_pose
 from motion.robot_kinematics import (
     EE_FRAME,
@@ -61,6 +62,8 @@ __all__ = [
     "URDF_JOINT_NAMES",
     "Arm",
     "ArmError",
+    "PickTargets",
+    "load_pick_targets",
     "Controller",
     "fetch_pose",
     "grip_100_to_user",

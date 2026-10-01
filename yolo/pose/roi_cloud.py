@@ -16,6 +16,7 @@ V4L2 컬러만으로는 안 된다. Orbbec SDK(D2C) + 학습한 best.pt / best-s
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import threading
@@ -25,6 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from yolo.config import quiet_gtk
+
+quiet_gtk()
+
 from vision.calib import intrinsics_for_rotate180, load_K, load_T_base_cam
 from vision.camera import FRAME_HEIGHT, FRAME_WIDTH, ROTATE_180
 from vision.transforms import invert_T, plane_tilt_from_z_deg, transform_plane
@@ -33,7 +38,18 @@ from vision.orbbec_filters import (
     NOISE_MIN_DIFF_DEFAULT,
     OrbbecFilterPanel,
 )
-from yolo.config import BEST_PT, BEST_SEG_PT, DETECT_CONF, RUNS_DIR, add_class_argument, class_from_args, quiet_gtk
+from yolo.config import (
+    BEST_PT,
+    BEST_SEG_PT,
+    DETECT_CONF,
+    PLACE_POSE_JSON,
+    REGISTER_REQUEST_JSON,
+    REGISTER_STATUS_JSON,
+    RUNS_DIR,
+    add_class_argument,
+    class_from_args,
+    pose_name,
+)
 from yolo.pose.depth_cloud import (
     colorize_depth,
     fit_plane_ransac,
@@ -45,13 +61,63 @@ from yolo.pose.depth_cloud import (
 from yolo.pose.debug.local_plane import SLICE_MM, local_pose
 from yolo.pose.instances import MASK_PLANE_MM, collect_instances, select_topmost
 
-quiet_gtk()
-
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 WIN = "YOLO box ROI cloud"
 ROI_DIR = RUNS_DIR / "roi"
+_POSE_BGR = {
+    0: (80, 220, 80),
+    1: (0, 180, 255),
+    2: (80, 80, 255),
+}
+
+
+def _publish_place_pose(pose: dict | None) -> None:
+    """맞춘 베이스 6D를 펜던트가 읽을 파일에 적는다. miss면 ok=false."""
+    PLACE_POSE_JSON.parent.mkdir(parents=True, exist_ok=True)
+    if pose is None or not pose.get("aligned_ok"):
+        payload = {"ok": False}
+    else:
+        xyz, rpy, _body = _place_ui_xyzrpy(pose["T"])
+        payload = {
+            "ok": True,
+            "xyz_mm": [float(v) for v in xyz],
+            "rpy_deg": [float(v) for v in rpy],
+        }
+    tmp = PLACE_POSE_JSON.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(PLACE_POSE_JSON)
+
+
+def _read_register_request() -> str | None:
+    """펜던트가 적은 등록 요청 id. 없거나 깨졌으면 None."""
+    try:
+        data = json.loads(REGISTER_REQUEST_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    rid = data.get("id") if isinstance(data, dict) else None
+    if not isinstance(rid, str) or not rid:
+        return None
+    return rid
+
+
+def _write_register_status(
+    req_id: str,
+    state: str,
+    *,
+    xyz=None,
+    rpy=None,
+) -> None:
+    """펜던트 폴링용. state: run, busy, no_box, fail, ok."""
+    REGISTER_STATUS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"id": str(req_id), "state": state}
+    if xyz is not None and rpy is not None:
+        payload["xyz_mm"] = [float(v) for v in xyz]
+        payload["rpy_deg"] = [float(v) for v in rpy]
+    tmp = REGISTER_STATUS_JSON.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(REGISTER_STATUS_JSON)
 
 
 def _work_desk_plane(plane, T_bc) -> np.ndarray | None:
@@ -243,6 +309,7 @@ class _CadWorker:
         self._T_init: np.ndarray | None = None
         self._T_prev: np.ndarray | None = None
         self._desk_plane: np.ndarray | None = None
+        self._class_id: int | None = None
         self.result: dict | None = None
         self.error: str | None = None
         self.busy = False
@@ -258,6 +325,7 @@ class _CadWorker:
         T_init: np.ndarray | None = None,
         T_prev: np.ndarray | None = None,
         desk_plane: np.ndarray | None = None,
+        class_id: int | None = None,
     ) -> bool:
         if len(xyz) < 20:
             return False
@@ -272,8 +340,10 @@ class _CadWorker:
                 if desk_plane is None
                 else np.asarray(desk_plane, dtype=np.float64).reshape(4).copy()
             )
+            self._class_id = None if class_id is None else int(class_id)
             self.busy = True
             self.error = None
+            self.result = None
         return True
 
     def _loop(self) -> None:
@@ -283,6 +353,7 @@ class _CadWorker:
                 T_init = self._T_init
                 T_prev = self._T_prev
                 desk_plane = self._desk_plane
+                class_id = self._class_id
                 self._job = None
             if xyz is None:
                 time.sleep(0.03)
@@ -298,6 +369,7 @@ class _CadWorker:
                     T_prev=T_prev,
                     camera_origin=self.camera_origin,
                     desk_plane=desk_plane,
+                    class_id=None if T_init is not None else class_id,
                 )
                 err = None
             except Exception as exc:
@@ -353,6 +425,12 @@ class _CadWorker:
             self.result = None
         return result
 
+    def take_error(self) -> str | None:
+        with self._lock:
+            err = self.error
+            self.error = None
+        return err
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="YOLO box → RGB-D point ROI")
@@ -371,15 +449,15 @@ def main() -> None:
     )
     parser.add_argument("--pad", type=int, default=2)
     parser.add_argument(
-        "--show-obb",
+        "--show-box",
         action="store_true",
-        help="RGB·뎁스에 YOLO OBB 네 변을 그림 (자홍). 노란 선은 ROI 윤곽",
+        help="RGB·뎁스에 YOLO 가로세로 박스를 그림 (자홍). 노란 선은 ROI 윤곽",
     )
     parser.add_argument(
         "--plane-mm",
         type=float,
-        default=4.0,
-        help="박스 모드에서 책상 평면 이내 점 제거(mm). --mask 는 2mm 고정",
+        default=3.0,
+        help="박스 모드에서 책상 평면 이내 점 제거(mm). --mask 도 3mm",
     )
     parser.add_argument("--no-plane", action="store_true", help="RANSAC 책상 제거 안 함")
     parser.add_argument(
@@ -418,7 +496,7 @@ def main() -> None:
         type=float,
         default=2.5,
         metavar="SEC",
-        help="첫 등록 재시도·물체 이동 후 ICP 주기(초). c 는 전체 RANSAC",
+        help="물체가 움직인 뒤 ICP를 다시 하는 주기(초). 전체 검색은 한 번, c 로만 다시",
     )
     parser.add_argument(
         "--cad-move-mm",
@@ -522,6 +600,9 @@ def main() -> None:
     cad_worker = None
     last_cad_t = 0.0
     last_cad_anchor = None
+    cad_full_done = False
+    pending_req_id: str | None = None
+    seen_req_id = _read_register_request()
     if args.cad:
         print("CAD 로드 중...")
         T_cad_grasp, grasp_xyz_mm, grasp_rpy_deg = _load_grasp_cad()
@@ -529,6 +610,8 @@ def main() -> None:
             f"obj(티칭) xyz=[{grasp_xyz_mm[0]:.1f}, {grasp_xyz_mm[1]:.1f}, {grasp_xyz_mm[2]:.1f}]  "
             f"rpy=[{grasp_rpy_deg[0]:.1f}, {grasp_rpy_deg[1]:.1f}, {grasp_rpy_deg[2]:.1f}]"
         )
+        if args.base:
+            _publish_place_pose(None)
         cad_worker = _CadWorker(
             voxel_mm=args.voxel_mm,
             flip=bool(args.base),
@@ -539,10 +622,21 @@ def main() -> None:
             grasp_rpy_deg=grasp_rpy_deg,
             frame_name=frame_name,
         )
-        print(
-            "CAD: 첫 등록 후 정지하면 축 고정. "
-            f"점군이 {args.cad_move_mm:.0f}mm 이상 움직이면 ICP. c 는 처음부터."
-        )
+        if args.base:
+            print(
+                "CAD: YOLO 자세(서있기/눕히기/비스듬히)로 한 번 맞춘다. "
+                "맞으면 축을 고정하고, "
+                f"{args.cad_move_mm:.0f}mm 이상 움직이면 ICP. "
+                "클래스 후보가 모두 실패하면 전체 검색 한 번. "
+                "miss면 멈춤. c 는 처음부터."
+            )
+        else:
+            print(
+                "CAD: 베이스가 아니라 클래스 각도를 쓰지 않는다. "
+                "전체 검색은 한 번. 맞으면 축을 고정하고, "
+                f"{args.cad_move_mm:.0f}mm 이상 움직이면 ICP. "
+                "miss면 멈춤. c 는 처음부터."
+            )
         print(
             f"밀도  stride={args.stride}  등록={args.voxel_mm:g}mm  "
             f"표시={args.overlay_voxel_mm:g}mm"
@@ -624,6 +718,9 @@ def main() -> None:
             )
             chosen = select_topmost(instances)
             n_det = len(instances)
+            cad_class_id = None
+            if chosen is not None and T_bc is not None:
+                cad_class_id = instances[chosen].class_id
             last_pose = None
             if chosen is None:
                 last_xyz = np.zeros((0, 3), dtype=np.float32)
@@ -641,46 +738,74 @@ def main() -> None:
             if cad_worker is not None:
                 nxt = cad_worker.take_result()
                 if nxt is not None:
-                    # 실패한 후보는 숫자·축·Open3D에 절대 내보내지 않는다.
+                    tracked = str(nxt.get("source", "")).endswith("track")
+                    # 실패한 전체 검색은 숫자·축에 내지 않고, 다시 돌리지 않는다.
                     if nxt.get("aligned_ok", False):
                         cad_pose = nxt
+                        cad_full_done = True
                         if len(last_xyz) >= 20:
                             last_cad_anchor = _median_xyz(last_xyz)
+                        if T_bc is not None:
+                            _publish_place_pose(nxt)
+                    elif tracked and cad_pose is not None:
+                        print("CAD 추적 miss. 기존 축 유지. 처음부터는 c.")
                     else:
                         cad_pose = None
                         last_cad_anchor = None
-                        # miss 직후 due 가 이미 지나 있어 바로 전체 RANSAC이 다시 돈다.
-                        last_cad_t = time.monotonic()
+                        cad_full_done = True
+                        print("CAD miss. 전체 검색은 멈춤. 처음부터는 c.")
+                        if T_bc is not None:
+                            _publish_place_pose(None)
+                    if pending_req_id is not None and not tracked:
+                        if nxt.get("aligned_ok", False) and T_bc is not None:
+                            xyz_ui, rpy_ui, _body_ui = _place_ui_xyzrpy(nxt["T"])
+                            _write_register_status(
+                                pending_req_id, "ok", xyz=xyz_ui, rpy=rpy_ui
+                            )
+                        else:
+                            _write_register_status(pending_req_id, "fail")
+                        pending_req_id = None
+                elif pending_req_id is not None and not cad_worker.busy:
+                    cad_worker.take_error()
+                    _write_register_status(pending_req_id, "fail")
+                    pending_req_id = None
                 now = time.monotonic()
                 due = (now - last_cad_t) >= max(0.2, float(args.cad_every))
                 pose_ok = cad_pose is not None and cad_pose.get("aligned_ok", False)
                 if len(last_xyz) >= 20 and due:
-                    T_keep = cad_pose["T"] if pose_ok else None
-                    anchor = _median_xyz(last_xyz)
-                    moved = (
-                        last_cad_anchor is None
-                        or float(np.linalg.norm(anchor - last_cad_anchor))
-                        >= max(1.0, float(args.cad_move_mm))
-                    )
-                    if not pose_ok or moved:
-                        if cad_worker.submit(
+                    desk = _work_desk_plane(plane, T_bc)
+                    if pose_ok:
+                        anchor = _median_xyz(last_xyz)
+                        moved = (
+                            last_cad_anchor is None
+                            or float(np.linalg.norm(anchor - last_cad_anchor))
+                            >= max(1.0, float(args.cad_move_mm))
+                        )
+                        if moved and cad_worker.submit(
                             last_xyz,
-                            T_init=T_keep,
-                            T_prev=T_keep,
-                            desk_plane=_work_desk_plane(plane, T_bc),
+                            T_init=cad_pose["T"],
+                            T_prev=cad_pose["T"],
+                            desk_plane=desk,
                         ):
                             last_cad_t = now
-                            if pose_ok:
-                                last_cad_anchor = anchor
+                    elif not cad_full_done and cad_worker.submit(
+                        last_xyz,
+                        T_init=None,
+                        T_prev=None,
+                        desk_plane=desk,
+                        class_id=cad_class_id,
+                    ):
+                        last_cad_t = now
+                        cad_full_done = True
 
             for i, inst in enumerate(instances):
                 x1, y1, x2, y2 = [int(v) for v in inst.xyxy]
                 color = (0, 255, 255) if i == chosen else (0, 180, 0)
-                if args.show_obb and inst.quad is not None:
-                    obb_pts = np.round(inst.quad).astype(np.int32).reshape(-1, 1, 2)
-                    obb_color = (255, 0, 255) if i == chosen else (180, 0, 180)
-                    cv2.polylines(bgr, [obb_pts], True, obb_color, 1, cv2.LINE_AA)
-                    cv2.polylines(depth_vis, [obb_pts], True, obb_color, 1, cv2.LINE_AA)
+                if args.show_box and inst.quad is not None:
+                    box_pts = np.round(inst.quad).astype(np.int32).reshape(-1, 1, 2)
+                    box_color = (255, 0, 255) if i == chosen else (180, 0, 180)
+                    cv2.polylines(bgr, [box_pts], True, box_color, 1, cv2.LINE_AA)
+                    cv2.polylines(depth_vis, [box_pts], True, box_color, 1, cv2.LINE_AA)
                 if args.mask:
                     tint = np.zeros_like(bgr)
                     tint[inst.roi] = color
@@ -693,30 +818,30 @@ def main() -> None:
                         tag_x, tag_y = x1, max(16, y1 - 6)
                 else:
                     tag_x, tag_y = x1, max(16, y1 - 6)
-                tag = f"{len(inst.xyz)} pts zok={inst.n_zok}"
-                if i == chosen and last_pose is not None:
-                    tag = (
-                        f"yaw={last_pose['yaw_deg']:.1f} n={last_pose['n_points']}"
-                        f" zok={inst.n_zok}"
-                    )
+                pose = (
+                    pose_name(inst.class_id, korean=True)
+                    if inst.class_id is not None
+                    else "?"
+                )
+                pose_color = _POSE_BGR.get(inst.class_id, color)
                 cv2.putText(
                     bgr,
-                    tag,
+                    pose,
                     (tag_x, tag_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    1,
+                    0.6,
+                    pose_color,
+                    2,
                     cv2.LINE_AA,
                 )
 
             ztxt = ""
             if len(last_xyz):
                 ztxt = f"  zmed={float(np.median(last_xyz[:, 2])):.0f}"
-            yawtxt = ""
+            ctxt = ""
             if last_pose is not None:
                 c = last_pose["center_mm"]
-                yawtxt = f"  yaw={last_pose['yaw_deg']:.1f} c={c[0]:.0f},{c[1]:.0f}"
+                ctxt = f"  c={c[0]:.0f},{c[1]:.0f}"
             if plane is None:
                 plane_text = "plane=off"
             else:
@@ -725,10 +850,13 @@ def main() -> None:
             hint = "v=3D s=save r=plane q=quit"
             if args.cad:
                 hint = "c=CAD " + hint
+            pose_txt = ""
+            if chosen is not None and instances[chosen].class_id is not None:
+                pose_txt = "  " + pose_name(instances[chosen].class_id, korean=True)
             cv2.putText(
                 bgr,
-                f"n={n_det} sel={0 if chosen is None else chosen} pts={len(last_xyz)}"
-                f"{ztxt}{yawtxt} {plane_text} {frame_name} {hint}",
+                f"n={n_det} sel={0 if chosen is None else chosen}{pose_txt}"
+                f"{ztxt}{ctxt} {plane_text} {frame_name} {hint}",
                 (8, 24),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
@@ -766,34 +894,21 @@ def main() -> None:
                         cad_line += f" iou={iou:.2f}"
                     if not ok:
                         cad_line += "  MISS"
-                    obj_line = (
-                        f"grasp(티칭·물체축) xyz={grasp_xyz_mm[0]:.0f},{grasp_xyz_mm[1]:.0f},{grasp_xyz_mm[2]:.0f}  "
-                        f"rpy={grasp_rpy_deg[0]:.1f},{grasp_rpy_deg[1]:.1f},{grasp_rpy_deg[2]:.1f}"
-                    )
                 elif cad_worker is not None and cad_worker.busy:
                     xyz_line = "물체 x/y/z 축: 등록 중 ..."
                     body_line = "물체 Rx/Ry/Rz: ..."
                     base_line = "베이스 기준 Rx/Ry/Rz: ..."
                     cad_line = "CAD ..."
-                    obj_line = (
-                        f"grasp(티칭/물체축) xyz={grasp_xyz_mm[0]:.0f},{grasp_xyz_mm[1]:.0f},{grasp_xyz_mm[2]:.0f}  "
-                        f"rpy={grasp_rpy_deg[0]:.1f},{grasp_rpy_deg[1]:.1f},{grasp_rpy_deg[2]:.1f}"
-                    )
                 else:
                     xyz_line = "물체 x/y/z 축: 대기 (점군 나오면 시작)"
                     body_line = "물체 Rx/Ry/Rz: 대기"
                     base_line = "베이스 기준 Rx/Ry/Rz: 대기"
                     cad_line = "CAD 대기"
-                    obj_line = (
-                        f"grasp(티칭/물체축) xyz={grasp_xyz_mm[0]:.0f},{grasp_xyz_mm[1]:.0f},{grasp_xyz_mm[2]:.0f}  "
-                        f"rpy={grasp_rpy_deg[0]:.1f},{grasp_rpy_deg[1]:.1f},{grasp_rpy_deg[2]:.1f}"
-                    )
                 overlay_lines = [
                     (50, xyz_line, (0, 255, 255)),
                     (78, body_line, (0, 255, 255)),
                     (106, base_line, (0, 255, 255)),
                     (134, cad_line, (180, 180, 80)),
-                    (162, obj_line, (0, 220, 255)),
                 ]
                 for y, text, color in overlay_lines:
                     if not text:
@@ -822,19 +937,44 @@ def main() -> None:
                 break
             if key == ord("r") and not args.no_plane:
                 refit_plane = True
-            if key == ord("c") and cad_worker is not None:
-                if len(last_xyz) < 20:
-                    print("등록할 점이 없습니다.")
+            incoming = _read_register_request()
+            req_id = None
+            if incoming and incoming != seen_req_id:
+                seen_req_id = incoming
+                req_id = incoming
+            if req_id is not None and cad_worker is None:
+                _write_register_status(req_id, "fail")
+            elif (key == ord("c") and cad_worker is not None) or req_id is not None:
+                if cad_worker.busy:
+                    if req_id is not None:
+                        _write_register_status(req_id, "busy")
+                    else:
+                        print("이미 등록 중입니다.")
+                elif req_id is not None and chosen is None:
+                    _write_register_status(req_id, "no_box")
+                elif len(last_xyz) < 20:
+                    if req_id is not None:
+                        _write_register_status(req_id, "fail")
+                    else:
+                        print("등록할 점이 없습니다.")
                 elif not cad_worker.submit(
                     last_xyz,
                     T_init=None,
                     T_prev=None if cad_pose is None else cad_pose["T"],
                     desk_plane=_work_desk_plane(plane, T_bc),
+                    class_id=cad_class_id,
                 ):
-                    print("이미 등록 중입니다.")
+                    if req_id is not None:
+                        _write_register_status(req_id, "busy")
+                    else:
+                        print("이미 등록 중입니다.")
                 else:
                     last_cad_t = time.monotonic()
                     last_cad_anchor = None
+                    cad_full_done = True
+                    if req_id is not None:
+                        pending_req_id = req_id
+                        _write_register_status(req_id, "run")
                     print("CAD 처음부터 다시 등록")
             if key == ord("v"):
                 if len(last_xyz) == 0:

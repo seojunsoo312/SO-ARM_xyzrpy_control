@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+try:
+    from yolo.config import quiet_gtk
+
+    quiet_gtk()
+except Exception:
+    pass
+
 import cv2
 
 CAMERA_INDEX = None
