@@ -5,7 +5,12 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from yolo.pose.depth_cloud import pca_obb
 from yolo.pose.instances import height_above_plane
@@ -125,3 +130,10 @@ def local_pose(
         "source": "local_plane",
         "axis_2d": pca["axis"],
     }
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "이 파일은 따로 실행하지 않습니다. "
+        "윗면 확인은 python yolo/pose/roi_cloud.py 안에서 합니다."
+    )

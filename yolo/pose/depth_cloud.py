@@ -86,29 +86,6 @@ def mask_from_xyxy(
     return mask
 
 
-def mask_from_seg(masks_data, index: int, h: int, w: int) -> np.ndarray:
-    raw = masks_data[index]
-    if hasattr(raw, "cpu"):
-        raw = raw.cpu().numpy()
-    raw = np.asarray(raw)
-    if raw.ndim == 3:
-        raw = raw[0]
-    resized = cv2.resize(raw.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
-    return resized > 0.5
-
-
-def mask_from_seg_xy(masks_xy, index: int, h: int, w: int) -> np.ndarray:
-    """원본 해상도 폴리곤. letterbox된 masks.data 리사이즈보다 맞다."""
-    mask = np.zeros((h, w), dtype=np.uint8)
-    if masks_xy is None or index >= len(masks_xy):
-        return mask.astype(bool)
-    pts = np.asarray(masks_xy[index], dtype=np.float32).reshape(-1, 2)
-    if len(pts) < 3:
-        return mask.astype(bool)
-    cv2.fillPoly(mask, [np.round(pts).astype(np.int32)], 1)
-    return mask.astype(bool)
-
-
 def fit_plane_ransac(
     xyz: np.ndarray,
     threshold_mm: float = 3.0,

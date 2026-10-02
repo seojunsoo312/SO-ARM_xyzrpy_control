@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 
@@ -26,15 +24,13 @@ from motion.controller import (
 from motion.hw_controller import Hardware, grip_100_to_user, grip_user_to_100
 from motion.robot_kinematics import (
     ARM_JOINT_NAMES,
+    DEFAULT_URDF,
     GRIPPER_JOINT,
     HOME_JOINTS_DEG,
     INIT_POSE_JOINTS_DEG,
     RobotKinematics,
 )
 
-_PROJECT = Path(__file__).resolve().parent.parent
-_PENDANT = _PROJECT / "pendant"
-_DEFAULT_URDF = _PENDANT / "SO101_6DOF.urdf"
 _ALREADY = "already at joint target"
 _MODES = ("virtual", "real")
 _MOVE_MODES = ("abs", "rel")
@@ -67,7 +63,7 @@ class Arm:
         self._owned = True
         self._watch_stop = False
         self._motion_epoch = 0
-        kin = RobotKinematics(_DEFAULT_URDF)
+        kin = RobotKinematics(DEFAULT_URDF)
         hardware = Hardware() if key == "real" else None
         try:
             self._ctrl = Controller(kin, hardware=hardware)
@@ -106,10 +102,10 @@ class Arm:
         self._show(st)
         joints = st.joints_deg
         return {
-            "joints_deg": [_round1(joints[name]) for name in ARM_JOINT_NAMES],
-            "gripper": _round1(grip_user_to_100(float(joints[GRIPPER_JOINT]))),
-            "xyz_mm": [_round1(v) for v in st.pose.xyz_mm],
-            "rpy_deg": [_round1(v) for v in st.pose.rpy_deg],
+            "joints_deg": [_round2(joints[name]) for name in ARM_JOINT_NAMES],
+            "gripper": _round2(grip_user_to_100(float(joints[GRIPPER_JOINT]))),
+            "xyz_mm": [_round2(v) for v in st.pose.xyz_mm],
+            "rpy_deg": [_round2(v) for v in st.pose.rpy_deg],
         }
 
     def moveL(
@@ -308,16 +304,12 @@ class Arm:
 
     @staticmethod
     def _open_visualizer(kin: RobotKinematics, *, open_browser: bool):
-        for path in (_PROJECT, _PENDANT):
-            text = str(path)
-            if text not in sys.path:
-                sys.path.insert(0, text)
-        from visualizer import Visualizer
+        from motion.visualizer import Visualizer
 
         return Visualizer(kin, open_browser=open_browser)
 
 
-def _round1(value) -> float:
+def _round2(value) -> float:
     return round(float(value), 2)
 
 

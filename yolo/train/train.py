@@ -2,10 +2,9 @@
 """YOLO11n 을 이 보드에서 자세 3클래스로 파인튜닝한다.
 
 COCO 에 없는 물건이어도 pretrained nano 가중치에서 시작하는 편이 낫다.
-클래스는 data.yaml 의 stand / lie / slant 이다.
+클래스는 data.yaml 의 세우기 / 눕히기 / 비스듬히 이다.
 
   python yolo/train/train.py
-  python yolo/train/train.py --seg
   python yolo/train/train.py --epochs 50 --batch 2
 """
 
@@ -20,14 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from yolo.config import (
     BEST_PT,
-    BEST_SEG_PT,
     DATA_YAML,
     POSE_CLASSES,
     RUNS_DIR,
     TRAIN_BATCH,
     TRAIN_EPOCHS,
     TRAIN_IMGSZ,
-    TRAIN_SEG_BATCH,
     TRAIN_TXT,
     TRAIN_WORKERS,
     WEIGHTS_DIR,
@@ -46,18 +43,15 @@ def _device() -> str | int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="3-pose YOLO11n train")
-    parser.add_argument("--seg", action="store_true", help="yolo11n-seg + 폴리곤 라벨")
     parser.add_argument("--epochs", type=int, default=TRAIN_EPOCHS)
-    parser.add_argument("--batch", type=int, default=None)
+    parser.add_argument("--batch", type=int, default=TRAIN_BATCH)
     parser.add_argument("--imgsz", type=int, default=TRAIN_IMGSZ)
     parser.add_argument("--model", default=None, help="시작 가중치 (전이학습)")
     args = parser.parse_args()
-    batch = args.batch if args.batch is not None else (
-        TRAIN_SEG_BATCH if args.seg else TRAIN_BATCH
-    )
-    start_model = args.model or default_start_pt(seg=args.seg)
-    run_name = "train_seg" if args.seg else "train"
-    dest = BEST_SEG_PT if args.seg else BEST_PT
+    batch = args.batch
+    start_model = args.model or default_start_pt()
+    run_name = "train"
+    dest = BEST_PT
 
     n_train = 0
     if TRAIN_TXT.is_file():
@@ -104,7 +98,7 @@ def main() -> None:
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(run_best, dest)
     print(f"복사 {run_best} → {dest}")
-    print("다음: python yolo/train/detect.py --seg" if args.seg else "다음: python yolo/train/detect.py")
+    print("다음: python yolo/train/detect.py")
 
 
 if __name__ == "__main__":

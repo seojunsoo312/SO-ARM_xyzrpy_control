@@ -42,7 +42,7 @@ from motion.controller import (
 )
 from motion.hw_controller import grip_100_to_user, grip_user_to_100
 from motion.robot_kinematics import GRIPPER_JOINT, LEROBOT_FROM_URDF, SHUTDOWN_JOINTS_DEG, URDF_JOINT_NAMES
-from visualizer import Visualizer
+from motion.visualizer import Visualizer
 
 DISPLAY_MS = 33
 

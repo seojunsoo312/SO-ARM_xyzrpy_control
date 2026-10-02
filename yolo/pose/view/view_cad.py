@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""yolo/cad/ STL 축을 보여 준다 (model.yaml mesh_rpy 적용 후가 정본).
+"""cad/ STL 축을 보여 준다 (model.yaml mesh_rpy 적용 후가 정본).
 
 등록·카메라 없음. 이 축이 roi_cloud.py / register.py 가 맞추는 정본이다.
 원점 = (0,0,0), 회전 0(보정 후). 빨강=X 초록=Y 파랑=Z.
@@ -19,13 +19,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from yolo.config import CAD_DIR, cad_mesh_path, cad_mesh_rpy_deg, cad_unit
-from yolo.pose.register import _to_mm, apply_cad_mesh_frame
+from cad.model import CAD_DIR, apply_mesh_frame, mesh_path, mesh_rpy_deg, to_mm, unit
 
 
 def _resolve_mesh(name: str | None) -> Path:
     if name is None:
-        return cad_mesh_path()
+        return mesh_path()
     raw = Path(name)
     if raw.is_file():
         return raw.resolve()
@@ -52,7 +51,7 @@ def _load_mesh_mm(path: Path):
     mesh = o3d.io.read_triangle_mesh(str(path))
     if not mesh.has_triangles() or len(mesh.triangles) == 0:
         raise RuntimeError(f"삼각형 없음: {path}")
-    verts = apply_cad_mesh_frame(_to_mm(np.asarray(mesh.vertices), cad_unit(), path), source=path)
+    verts = apply_mesh_frame(to_mm(np.asarray(mesh.vertices), unit(), path), source=path)
     mesh.vertices = o3d.utility.Vector3dVector(verts)
     mesh.compute_vertex_normals()
     if not mesh.has_vertex_colors():
@@ -65,7 +64,7 @@ def _print_axes(path: Path, verts: np.ndarray, axis_mm: float) -> None:
     hi = verts.max(axis=0)
     span = hi - lo
     inside = bool(np.all(lo <= 0.0) and np.all(hi >= 0.0))
-    rpy = cad_mesh_rpy_deg() if path.resolve() == cad_mesh_path().resolve() else (0.0, 0.0, 0.0)
+    rpy = mesh_rpy_deg() if path.resolve() == mesh_path().resolve() else (0.0, 0.0, 0.0)
     print(f"파일  {path}")
     print(f"CAD 축 = STL + mesh_rpy {list(rpy)}  → 원점 (0,0,0) mm, 보정 후 rpy = 0,0,0")
     print("빨강=X  초록=Y  파랑=Z")
@@ -103,7 +102,7 @@ def _show(mesh, *, title: str, axis_mm: float) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="yolo/cad STL 파일 축(XYZ) 보기. 등록 없음."
+        description="cad/ STL 파일 축(XYZ) 보기. 등록 없음."
     )
     parser.add_argument(
         "mesh",
@@ -120,7 +119,7 @@ def main() -> None:
     parser.add_argument(
         "--list",
         action="store_true",
-        help="yolo/cad/ 의 stl/ply 만 나열",
+        help="cad/ 의 stl/ply 만 나열",
     )
     args = parser.parse_args()
 
@@ -134,7 +133,7 @@ def main() -> None:
         if not files:
             raise SystemExit("stl/ply 없음")
         for name in files:
-            mark = "  (model.yaml)" if name == cad_mesh_path().name else ""
+            mark = "  (model.yaml)" if name == mesh_path().name else ""
             print(f"  {name}{mark}")
         return
 

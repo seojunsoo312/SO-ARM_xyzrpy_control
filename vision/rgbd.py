@@ -39,6 +39,8 @@ OB_PROP_DEPTH_EXPOSURE_INT = 2017
 OB_PROP_DEPTH_GAIN_INT = 2018
 OB_PERMISSION_WRITE = 2
 OB_PERMISSION_ANY = 255
+OB_LOG_SEVERITY_ERROR = 3
+OB_LOG_SEVERITY_OFF = 5
 OB_FORMAT_MJPG = 5
 OB_FORMAT_RGB = 22
 OB_FORMAT_BGR = 23
@@ -87,17 +89,16 @@ def _sdk_so(sdk: Path) -> Path | None:
 
 
 def resolve_sdk_dir() -> Path:
+    """ORBBEC_SDK_DIR, 없으면 프로젝트 폴더와 같은 곳의 OrbbecViewer_*."""
     env = os.environ.get("ORBBEC_SDK_DIR")
     if env:
         return Path(env).expanduser()
-    downloads = Path.home() / "Downloads"
-    candidates: list[Path] = []
-    if downloads.is_dir():
-        candidates.extend(sorted(downloads.glob("OrbbecViewer_*"), reverse=True))
+    parent = Path(__file__).resolve().parents[2]
+    candidates = sorted(parent.glob("OrbbecViewer_*"), reverse=True)
     for candidate in candidates:
         if _sdk_so(candidate) is not None:
             return candidate
-    return candidates[0] if candidates else downloads
+    return candidates[0] if candidates else parent
 
 
 def _require_sdk(sdk: Path) -> Path:
@@ -157,6 +158,21 @@ class OBCameraParam(Structure):
         ("transform", OBD2CTransform),
         ("isMirrored", c_bool),
     ]
+
+
+def _no_file_log(lib, sdk: Path) -> None:
+    """SDK 파일 로그를 끄고, 로그 폴더를 SDK 폴더 안으로 둔다.
+
+    폴더를 주지 않으면 SDK 가 실행한 폴더에 빈 Log/OrbbecSDK.log.txt 를 만든다.
+
+    콘솔에는 에러만 남긴다. 코드 설정이 OrbbecSDKConfig_v1.0.xml 보다 우선한다.
+    """
+    err = c_void_p()
+    set_severity = _bind(lib, "ob_set_logger_severity", None, c_int, EP)
+    set_severity(OB_LOG_SEVERITY_ERROR, byref(err))
+    set_file = _bind(lib, "ob_set_logger_to_file", None, c_int, c_char_p, EP)
+    log_dir = str((Path(sdk) / "Log").resolve()).encode()
+    set_file(OB_LOG_SEVERITY_OFF, log_dir, byref(err))
 
 
 def _chk(lib, err, where: str) -> None:
@@ -272,6 +288,7 @@ def read_factory_intrinsics(
     param: OBCameraParam | None = None
     try:
         lib = CDLL(f"./{so.name}", mode=RTLD_GLOBAL)
+        _no_file_log(lib, sdk)
         create = _bind(lib, "ob_create_pipeline", c_void_p, EP)
         get_dev = _bind(lib, "ob_pipeline_get_device", c_void_p, c_void_p, EP)
         get_list = _bind(lib, "ob_device_get_calibration_camera_param_list", c_void_p, c_void_p, EP)
@@ -436,6 +453,7 @@ class OrbbecV1:
         os.chdir(sdk)
         try:
             self.lib = CDLL(f"./{so.name}", mode=RTLD_GLOBAL)
+            _no_file_log(self.lib, sdk)
             L = self.lib
             self._create = _bind(L, "ob_create_pipeline", c_void_p, EP)
             self._get_cfg = _bind(L, "ob_pipeline_get_config", c_void_p, c_void_p, EP)
@@ -505,10 +523,8 @@ class OrbbecV1:
             self._del_frame = _bind(L, "ob_delete_frame", None, c_void_p, EP)
             self._stop = _bind(L, "ob_pipeline_stop", None, c_void_p, EP)
             self._del_pipe = _bind(L, "ob_delete_pipeline", None, c_void_p, EP)
-            self._set_log = _bind(L, "ob_set_logger_severity", None, c_int, EP)
             self._errmsg = _bind(L, "ob_error_message", c_char_p, c_void_p)
             self._delerr = _bind(L, "ob_delete_error", None, c_void_p)
-            self._quiet_log()
 
             err = c_void_p()
             self.pipe = self._create(byref(err))
@@ -1110,22 +1126,6 @@ class OrbbecV1:
         raw = np.ctypeslib.as_array((c_uint16 * (n // 2)).from_address(ptr)).copy()
         return raw.reshape(h, w).astype(np.float32) * scale
 
-    def _quiet_log(self) -> None:
-        """경고는 끄고 에러만 남긴다. 큐 초과·1ms 타임아웃 로그가 여기에 해당한다."""
-        fn = getattr(self, "_set_log", None)
-        if fn is None:
-            return
-        err = c_void_p()
-        try:
-            fn(3, byref(err))  # OB_LOG_SEVERITY_ERROR
-        except TypeError:
-            try:
-                fn(3)
-            except Exception:
-                return
-        if err:
-            self._delerr(err)
-
     def _drain_frames(self) -> None:
         pipe = getattr(self, "pipe", None)
         if not pipe:
@@ -1143,7 +1143,6 @@ class OrbbecV1:
     def close(self):
         self._temporal_on = False
         self._holefill_on = False
-        self._quiet_log()
         host = [
             getattr(self, "_temporal", None),
             getattr(self, "_holefill", None),

@@ -1,7 +1,7 @@
 """YOLO paths and pose-class names.
 
 자세 클래스는 POSE_CLASSES 가 정본이다. 라벨 txt 의 맨 앞 숫자가 그 인덱스다.
-기존 파일의 0 은 지우지 않는다. 라벨 UI에서 눌러 고치기 전까지 서있기로 읽힌다.
+기존 파일의 0 은 지우지 않는다. 라벨 UI에서 눌러 고치기 전까지 세우기로 읽힌다.
 """
 
 from __future__ import annotations
@@ -9,106 +9,31 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from cad.model import class_name
+
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
 
 CLASS_ID = 0
-# (인덱스, data.yaml 이름, 라벨 화면). 베이스 자세: 서있기 / 눕히기 / 비스듬히.
+# (인덱스, data.yaml 이름, 라벨 화면). 베이스 자세: 세우기 / 눕히기 / 비스듬히.
 POSE_CLASSES: tuple[tuple[int, str, str], ...] = (
-    (0, "stand", "서있기"),
-    (1, "lie", "눕히기"),
-    (2, "slant", "비스듬히"),
+    (0, "세우기", "세우기"),
+    (1, "눕히기", "눕히기"),
+    (2, "비스듬히", "비스듬히"),
 )
 
 RAW_IMAGES = ROOT / "datasets" / "raw" / "images"
 RAW_LABELS = ROOT / "datasets" / "raw" / "labels"
-RAW_LABELS_SEG = ROOT / "datasets" / "raw" / "labels_seg"
 SPLITS_DIR = ROOT / "datasets" / "splits"
 TRAIN_TXT = SPLITS_DIR / "train.txt"
 VAL_TXT = SPLITS_DIR / "val.txt"
-SEG_VIEW = ROOT / "datasets" / "seg"
 DATA_YAML = ROOT / "data.yaml"
 WEIGHTS_DIR = ROOT / "weights"
 RUNS_DIR = ROOT / "runs"
-# roi_cloud 가 맞춘 베이스 6D. 픽앤플레이스가 읽는다.
-PLACE_POSE_JSON = RUNS_DIR / "roi" / "place_pose.json"
-# 펜던트가 등록을 요청하고, roi_cloud 가 같은 id 로 상태를 돌려준다.
-REGISTER_REQUEST_JSON = RUNS_DIR / "roi" / "register_request.json"
-REGISTER_STATUS_JSON = RUNS_DIR / "roi" / "register_status.json"
+# 등록 요청 파일과 대기 시간은 yolo/pose/register_link.py.
 BEST_PT = WEIGHTS_DIR / "best.pt"
-BEST_SEG_PT = WEIGHTS_DIR / "best-seg.pt"
-_SAM_LOCAL = WEIGHTS_DIR / "mobile_sam.pt"
-SAM_MODEL = str(_SAM_LOCAL) if _SAM_LOCAL.is_file() else "mobile_sam.pt"  # Orin 8GB. sam_b.pt 는 무겁다.
 
-CAD_DIR = ROOT / "cad"
-CAD_YAML = CAD_DIR / "model.yaml"
-
-
-def _plain_yaml(path: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    if not path.is_file():
-        return out
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        stripped = raw.split("#", 1)[0]
-        if stripped[:1] in {" ", "\t"}:
-            continue
-        line = stripped.strip()
-        if not line or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        out[key.strip()] = value.strip().strip("'\"")
-    return out
-
-
-def cad_mesh_path() -> Path:
-    """yolo/cad/model.yaml 의 mesh. 부품 이름은 yaml 에만 둔다."""
-    spec = _plain_yaml(CAD_YAML)
-    name = spec.get("mesh")
-    if not name:
-        raise FileNotFoundError(
-            f"CAD mesh 없음. {CAD_YAML} 에 `mesh: 파일명` 을 적고 "
-            f"파일을 {CAD_DIR}/ 에 두세요."
-        )
-    path = CAD_DIR / name
-    if not path.is_file():
-        raise FileNotFoundError(f"CAD 파일 없음: {path}\n{CAD_YAML} 의 mesh 를 확인하세요.")
-    return path
-
-
-def cad_unit() -> str:
-    return _plain_yaml(CAD_YAML).get("unit", "mm") or "mm"
-
-
-def _yaml_vec3(key: str, *, default: tuple[float, float, float]) -> tuple[float, float, float]:
-    import ast
-
-    raw = _plain_yaml(CAD_YAML).get(key)
-    if not raw:
-        return default
-    try:
-        parsed = ast.literal_eval(raw)
-    except (SyntaxError, ValueError) as exc:
-        raise ValueError(f"{CAD_YAML} {key} 파싱 실패: {raw!r}") from exc
-    if not isinstance(parsed, (list, tuple)) or len(parsed) != 3:
-        raise ValueError(f"{CAD_YAML} {key} 는 숫자 3개여야 함: {raw!r}")
-    return (float(parsed[0]), float(parsed[1]), float(parsed[2]))
-
-
-def cad_mesh_rpy_deg() -> tuple[float, float, float]:
-    """STL 파일 → 프로젝트 CAD 프레임. model.yaml `mesh_rpy: [r,p,y]` (deg)."""
-    return _yaml_vec3("mesh_rpy", default=(0.0, 0.0, 0.0))
-
-
-def cad_mesh_xyz_mm() -> tuple[float, float, float]:
-    """회전 후 원점 이동(mm). model.yaml `mesh_xyz: [x,y,z]`."""
-    return _yaml_vec3("mesh_xyz", default=(0.0, 0.0, 0.0))
-
-
-def class_name() -> str:
-    """YOLO 1클래스 이름. cad/model.yaml 의 class, 없으면 object."""
-    return _plain_yaml(CAD_YAML).get("class") or "object"
-
-
+# 부품 이름(class)은 cad/model.yaml 에만 둔다. 읽기는 cad.model.
 CLASS_NAME = class_name()
 
 
@@ -154,13 +79,12 @@ TRAIN_IMGSZ = 640
 TRAIN_BATCH = 4
 TRAIN_EPOCHS = 50
 TRAIN_WORKERS = 0  # Jetson 공유메모리. PC면 2~4
-TRAIN_SEG_BATCH = 2  # seg는 detect보다 VRAM을 더 쓴다
 DETECT_CONF = 0.5
 
 
-def default_start_pt(*, seg: bool) -> str:
+def default_start_pt() -> str:
     """전이학습 시작 가중치. weights/ 에 있으면 그 경로, 없으면 파일명만 (ultralytics 가 받음)."""
-    name = "yolo11n-seg.pt" if seg else "yolo11n.pt"
+    name = "yolo11n.pt"
     local = WEIGHTS_DIR / name
     return str(local) if local.is_file() else name
 

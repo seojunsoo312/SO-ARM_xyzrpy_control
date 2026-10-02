@@ -26,7 +26,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from vision.transforms import apply_T, axis_angle_R, rotation_aligning, rt_to_T
-from yolo.config import cad_mesh_path, cad_mesh_rpy_deg, cad_mesh_xyz_mm, cad_unit
+from cad.model import apply_mesh_frame, mesh_path, mesh_rpy_deg, mesh_xyz_mm, to_mm, unit as cad_unit
 from yolo.pose.depth_cloud import write_ply
 
 MIN_POINTS = 20
@@ -41,32 +41,6 @@ def _require_o3d():
             "open3d가 없습니다. conda activate lerobot 한 뒤 설치하세요."
         ) from exc
     return o3d
-
-
-def cad_mesh_R() -> np.ndarray:
-    """model.yaml mesh_rpy → 3x3. 파일 좌표 → 프로젝트 CAD 프레임."""
-    from motion.robot_kinematics import rpy_deg_to_rotmat
-
-    r, p, y = cad_mesh_rpy_deg()
-    if abs(r) < 1e-12 and abs(p) < 1e-12 and abs(y) < 1e-12:
-        return np.eye(3)
-    return rpy_deg_to_rotmat(r, p, y)
-
-
-def apply_cad_mesh_frame(xyz: np.ndarray, *, source: Path | None = None) -> np.ndarray:
-    """STL/점군에 mesh_rpy 후 mesh_xyz. model.yaml mesh 가 아닐 때는 그대로."""
-    pts = _as_xyz(xyz)
-    if source is not None:
-        try:
-            if source.resolve() != cad_mesh_path().resolve():
-                return pts
-        except FileNotFoundError:
-            return pts
-    R = cad_mesh_R()
-    t = np.asarray(cad_mesh_xyz_mm(), dtype=np.float64).reshape(3)
-    if np.allclose(R, np.eye(3)) and np.allclose(t, 0.0):
-        return pts
-    return (R @ pts.T).T + t
 
 
 def _as_xyz(xyz: np.ndarray) -> np.ndarray:
@@ -86,23 +60,6 @@ def _pcd(xyz: np.ndarray):
 def _extent_mm(xyz: np.ndarray) -> np.ndarray:
     pts = _as_xyz(xyz)
     return pts.max(axis=0) - pts.min(axis=0)
-
-
-def _to_mm(xyz: np.ndarray, unit: str, source: Path) -> np.ndarray:
-    """yaml 단위 + 크기 보고 mm로 맞춘다. 이 STL은 m로 나온 적이 있다."""
-    pts = _as_xyz(xyz)
-    span = float(np.max(_extent_mm(pts)))
-    u = (unit or "mm").strip().lower()
-    if u in {"m", "meter", "meters", "metre", "metres"}:
-        print(f"CAD {source.name}: unit={u} → ×1000 mm")
-        return pts * 1000.0
-    if span < 2.0:
-        print(
-            f"CAD {source.name}: 크기 {span:.4f} (yaml은 mm). "
-            "m로 보고 ×1000"
-        )
-        return pts * 1000.0
-    return pts
 
 
 def load_ply_xyz(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
@@ -137,12 +94,12 @@ def load_ply_xyz(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
 def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarray:
     """CAD ply/mesh → mm 점군. model.yaml mesh 면 mesh_rpy 적용."""
     o3d = _require_o3d()
-    source = Path(path) if path is not None else cad_mesh_path()
+    source = Path(path) if path is not None else mesh_path()
     if not source.is_file():
         raise FileNotFoundError(f"CAD 없음: {source}")
     unit = cad_unit()
-    rpy = cad_mesh_rpy_deg() if source.resolve() == cad_mesh_path().resolve() else (0.0, 0.0, 0.0)
-    xyz0 = cad_mesh_xyz_mm() if source.resolve() == cad_mesh_path().resolve() else (0.0, 0.0, 0.0)
+    rpy = mesh_rpy_deg() if source.resolve() == mesh_path().resolve() else (0.0, 0.0, 0.0)
+    xyz0 = mesh_xyz_mm() if source.resolve() == mesh_path().resolve() else (0.0, 0.0, 0.0)
     key = (str(source.resolve()), float(voxel_mm), unit, rpy, xyz0)
     cached = _CAD_CACHE.get(key)
     if cached is not None:
@@ -150,7 +107,7 @@ def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarr
 
     mesh = o3d.io.read_triangle_mesh(str(source))
     if mesh.has_triangles() and len(mesh.triangles) > 0:
-        verts = apply_cad_mesh_frame(_to_mm(np.asarray(mesh.vertices), unit, source), source=source)
+        verts = apply_mesh_frame(to_mm(np.asarray(mesh.vertices), unit, source), source=source)
         mesh.vertices = o3d.utility.Vector3dVector(verts)
         mesh.compute_vertex_normals()
         area = float(mesh.get_surface_area())
@@ -164,7 +121,7 @@ def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarr
         pcd = o3d.io.read_point_cloud(str(source))
         if not pcd.has_points():
             raise RuntimeError(f"CAD를 못 읽음: {source}")
-        pts = apply_cad_mesh_frame(_to_mm(np.asarray(pcd.points), unit, source), source=source)
+        pts = apply_mesh_frame(to_mm(np.asarray(pcd.points), unit, source), source=source)
         pcd.points = o3d.utility.Vector3dVector(pts)
 
     if voxel_mm > 0:
@@ -971,7 +928,7 @@ def _yaw_samples(step_deg: float = CLASS_YAW_STEP_DEG) -> list[float]:
 def class_base_rpys(class_id: int) -> list[tuple[float, float, float]]:
     """펜던트 베이스 extrinsic (Rx, Ry, Rz). 위치는 포함하지 않는다.
 
-    0 서있기: Rx=Ry=0, Rz 한 바퀴.
+    0 세우기: Rx=Ry=0, Rz 한 바퀴.
     1 눕히기: Rx=+90 과 −90, Ry=0, Rz 한 바퀴.
     2 비스듬히: Rx=180, Ry=45, Rz=wrap(180+φ).
     """
@@ -1277,7 +1234,7 @@ def main() -> None:
         "--cad",
         type=Path,
         default=None,
-        help="생략하면 yolo/cad/model.yaml 의 mesh",
+        help="생략하면 cad/model.yaml 의 mesh",
     )
     parser.add_argument("--scene", type=Path, required=True, help="인스턴스 ply")
     parser.add_argument("--base", action="store_true", help="T_base_cam 으로 베이스 mm")

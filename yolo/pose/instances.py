@@ -15,14 +15,10 @@ from yolo.pose.depth_cloud import (
     Z_MAX_MM,
     Z_MIN_MM,
     largest_component,
-    mask_from_seg,
-    mask_from_seg_xy,
     mask_from_xyxy,
     plane_foreground_mask,
     points_from_mask,
 )
-
-MASK_PLANE_MM = 3.0
 
 
 @dataclass
@@ -63,13 +59,12 @@ def collect_instances(
     K: np.ndarray,
     result,
     plane: np.ndarray | None,
-    use_mask: bool,
     pad: int,
     plane_mm: float,
     stride: int,
     T_base_cam: np.ndarray | None,
 ) -> list[InstanceCloud]:
-    """One cloud per YOLO box (optional seg ∩ desk foreground)."""
+    """One cloud per YOLO box, desk foreground removed."""
     h, w = bgr.shape[:2]
     out: list[InstanceCloud] = []
     obb = getattr(result, "obb", None)
@@ -94,20 +89,14 @@ def collect_instances(
             if len(cls_arr):
                 class_id = int(cls_arr[0])
         roi = mask_from_xyxy(h, w, xyxy, pad=pad)
-        if use_mask and result.masks is not None:
-            if result.masks.xy is not None and i < len(result.masks.xy):
-                roi = roi & mask_from_seg_xy(result.masks.xy, i, h, w)
-            elif result.masks.data is not None and i < len(result.masks.data):
-                roi = roi & mask_from_seg(result.masks.data, i, h, w)
         n_zok = int(
             np.count_nonzero(
                 roi & (depth > Z_MIN_MM) & (depth < Z_MAX_MM)
             )
         )
-        # 박스: --plane-mm (기본 3). 마스크: 3mm. 책상 평면에서 이 거리 이내 점은 제거한다.
+        # 책상 평면에서 plane_mm 이내 점은 제거한다.
         if plane is not None:
-            cut_mm = MASK_PLANE_MM if use_mask else float(plane_mm)
-            roi = roi & plane_foreground_mask(depth, K, plane, height_mm=cut_mm)
+            roi = roi & plane_foreground_mask(depth, K, plane, height_mm=float(plane_mm))
         roi = largest_component(roi)
         xyz, rgb = points_from_mask(depth, K, roi, bgr=bgr, stride=stride)
         if in_base and len(xyz):

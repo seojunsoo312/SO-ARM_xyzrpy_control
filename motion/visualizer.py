@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import html
+import io
 import os
 import shutil
 import signal
@@ -13,10 +15,6 @@ import tempfile
 import time
 from collections import deque
 from pathlib import Path
-
-_PROJECT = Path(__file__).resolve().parent.parent
-if str(_PROJECT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT))
 
 import meshcat.geometry as g
 import meshcat.visualizer as meshcat_visualizer
@@ -253,7 +251,8 @@ class Visualizer:
             kinematics.collision_model,
             kinematics.visual_model,
         )
-        self._viz.initViewer(open=open_browser)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self._viz.initViewer(open=open_browser)
         self._viz.loadViewerModel(rootNodeName="SO101_6DOF")
         self._viz.viewer["SO101_6DOF"].set_transform(_robot_view_matrix())
         self._viz.displayCollisions(False)

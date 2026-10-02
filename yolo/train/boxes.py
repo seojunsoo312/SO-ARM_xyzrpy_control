@@ -4,10 +4,9 @@
   class_index cx cy w h   # 0~1, 축정렬
 내부 표현:
   LabeledBox(class_id, (4, 2) 픽셀). 네 점은 가로세로 박스의 꼭짓점이다.
-class_id 는 POSE_CLASSES (0 서있기, 1 눕히기, 2 비스듬히).
+class_id 는 POSE_CLASSES (0 세우기, 1 눕히기, 2 비스듬히).
 
 예전 네 점(OBB) 줄은 읽을 때 외접 가로세로 박스로 접는다.
-세그 폴리곤 헬퍼는 labels_seg 용. 박스 라벨과 별개다.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ def aabb_quad(x1: float, y1: float, x2: float, y2: float) -> Quad:
 
 
 def quad_to_xyxy(quad: Quad) -> list[float]:
-    """네 점 → 축정렬 xyxy. SAM 프롬프트·오버레이."""
+    """네 점 → 축정렬 xyxy."""
     pts = np.asarray(quad, dtype=np.float32).reshape(-1, 2)
     return [
         float(pts[:, 0].min()),
@@ -103,68 +102,6 @@ def save_yolo_txt(path: Path, boxes: list[LabeledBox], w: int, h: int) -> None:
             f"{int(box.class_id)} {float(cx):.6f} {float(cy):.6f} "
             f"{float(np.clip(bw, 0.0, 1.0)):.6f} {float(np.clip(bh, 0.0, 1.0)):.6f}"
         )
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-
-
-Polygon = list[tuple[float, float]]
-
-
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))
-
-
-def simplify_polygon_px(
-    pts: list[tuple[float, float]] | object, epsilon_ratio: float = 0.008
-) -> list[tuple[float, float]]:
-    import cv2
-
-    arr = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
-    if len(arr) < 3:
-        return [(float(x), float(y)) for x, y in arr]
-    peri = cv2.arcLength(arr, True)
-    eps = max(1.0, peri * epsilon_ratio)
-    approx = cv2.approxPolyDP(arr, eps, True).reshape(-1, 2)
-    if len(approx) < 3:
-        return [(float(x), float(y)) for x, y in arr]
-    return [(float(x), float(y)) for x, y in approx]
-
-
-def load_yolo_seg_txt(path: Path) -> list[tuple[int, Polygon]]:
-    if not path.exists():
-        return []
-    polygons: list[tuple[int, Polygon]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        parts = line.split()
-        if len(parts) < 7 or (len(parts) - 1) % 2 != 0:
-            continue
-        cid = _class_id(parts[0])
-        coords = [float(v) for v in parts[1:]]
-        poly = [
-            (_clamp01(coords[i]), _clamp01(coords[i + 1]))
-            for i in range(0, len(coords), 2)
-        ]
-        if len(poly) >= 3:
-            polygons.append((cid, poly))
-    return polygons
-
-
-def save_yolo_seg_txt(
-    path: Path,
-    polygons: list[Polygon] | list[tuple[int, Polygon]],
-    class_ids: list[int] | None = None,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    for i, item in enumerate(polygons):
-        if isinstance(item, tuple):
-            cid, poly = int(item[0]), item[1]
-        else:
-            cid = CLASS_ID if class_ids is None or i >= len(class_ids) else int(class_ids[i])
-            poly = item
-        if len(poly) < 3:
-            continue
-        body = " ".join(f"{_clamp01(x):.6f} {_clamp01(y):.6f}" for x, y in poly)
-        lines.append(f"{cid} {body}")
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 

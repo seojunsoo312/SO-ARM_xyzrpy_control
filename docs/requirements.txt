@@ -1,0 +1,15 @@
+# 프로젝트 공통 패키지. pendant, motion, vision, yolo 가 같이 쓴다.
+#   pip install -r docs/requirements.txt
+#
+# 이 보드(Jetson)에서는 pip로 받지 않는다.
+#   pinocchio, coal  conda install -c conda-forge pinocchio
+#   torch            이 보드용 휠. 설치 순서는 나중에 스크립트로 묶는다.
+#   lerobot          실기 Connect. Feetech extra 가 있는 환경
+
+numpy
+opencv-python
+Pillow
+meshcat
+customtkinter
+open3d>=0.18.0
+ultralytics>=8.3.0

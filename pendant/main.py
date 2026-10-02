@@ -27,15 +27,11 @@ from motion import (
     DEFAULT_PORT,
     DEFAULT_ROBOT_ID,
     DEFAULT_URDF,
-    EE_FRAME,
-    TCP_FRAME,
-    TCP_OFFSET_IN_L6,
-    URDF_JOINT_NAMES,
     Controller,
     Hardware,
     RobotKinematics,
 )
-from visualizer import Visualizer
+from motion.visualizer import Visualizer
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,8 +51,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Directory with {robot-id}.json. Default: lerobot-calibrate cache "
-            "(~/.cache/huggingface/lerobot/calibration/robots/so_follower), "
-            "then ./calibration/so_follower"
+            "(~/.cache/huggingface/lerobot/calibration/robots/so_follower)"
         ),
     )
     p.add_argument("--dof-mode", type=int, default=7, choices=(6, 7))
@@ -81,26 +76,11 @@ def main() -> None:
     args = parse_args()
     kin = RobotKinematics(args.urdf, tcp_offset=parse_tcp_offset(args.tcp_offset_mm))
     q = kin.q_home()
-    pose = kin.forward_tcp(q)
-    off_mm = kin.tcp_offset * 1000.0
-
-    print(f"URDF     {kin.urdf_path}")
-    print(f"nq       {kin.model.nq}  joints={list(URDF_JOINT_NAMES)}")
-    print(f"TCP      {TCP_FRAME} in {EE_FRAME}  offset {off_mm[0]:+.1f},{off_mm[1]:+.1f},{off_mm[2]:+.1f} mm")
-    print(f"         (CAD default {tuple(np.round(TCP_OFFSET_IN_L6 * 1000, 1))})")
-    xyz = pose.xyz_mm
-    rpy = pose.rpy_deg
-    print(f"HOME TCP x={xyz[0]:.1f} y={xyz[1]:.1f} z={xyz[2]:.1f} mm")
-    print(f"HOME RPY r={rpy[0]:.1f} p={rpy[1]:.1f} y={rpy[2]:.1f} deg")
-    print(f"HW       port={args.port}  id={args.robot_id}  dof={args.dof_mode}")
-    print(
-        f"calib    {args.calibration_dir or 'LeRobot cache (same as lerobot-calibrate), else ./calibration/so_follower'}"
-    )
-
-    viz = Visualizer(kin, open_browser=not args.no_open)
+    open_browser = not args.no_open
+    viz = Visualizer(kin, open_browser=open_browser)
     viz.display(q)
-    url = viz.url or "(meshcat server running)"
-    print(f"Meshcat  {url}")
+    if not open_browser and viz.url:
+        print(viz.url)
 
     hw = Hardware(
         port=args.port,
@@ -113,11 +93,7 @@ def main() -> None:
 
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
-    gui = PendantGui(root, ctrl, viz, meshcat_url=url, grasp=args.grasp)
-    if args.grasp and gui.grasp_ready:
-        print("Teach    사물 위치 패널 (같은 창, 같은 Meshcat)")
-    elif not args.grasp:
-        print("Teach    사물 위치 패널 잠김 (--grasp 로 조작)")
+    PendantGui(root, ctrl, viz, meshcat_url=viz.url or "", grasp=args.grasp)
     root.mainloop()
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """두 점을 찍어 YOLO 가로세로 박스 라벨을 만든다.
 
-자세는 0 서있기, 1 눕히기, 2 비스듬히. 숫자 키로 고른 뒤 대각 두 점을 찍는다.
+자세는 0 세우기, 1 눕히기, 2 비스듬히. 숫자 키로 고른 뒤 대각 두 점을 찍는다.
 이미 있는 박스 안을 클릭하면 그 박스만 지금 자세로 바꾼다. 좌표는 그대로다.
 
   python yolo/train/label.py
@@ -140,7 +140,7 @@ class Session:
         lines = [
             f"{index + 1}/{total}  다음={active}  boxes={len(self.boxes)}  "
             f"pts={len(self.pending)}/2  {self.w}x{self.h}",
-            "0 서있기  1 눕히기  2 비스듬히  |  박스 안 클릭=그 박스만 변경",
+            "0 세우기  1 눕히기  2 비스듬히  |  박스 안 클릭=그 박스만 변경",
             "click 2 corners  rmb/d=undo  r=clear  n/p  q=quit",
         ]
         y = 22

@@ -5,11 +5,11 @@
 본 프로젝트는 6자유도(6-DOF) 로봇팔인 SO101_6DOF (SO-101 기반, `elbow_roll` 모터 추가)을 제어하기 위한 GUI 기반의 독립형 티칭 펜던트 소프트웨어를 개발하는 것이다. 무거운 ROS 2 생태계를 배제하고, 순수 파이썬 환경에서 조그(Jog) 제어와 디지털 트윈(가상 시뮬레이션)을 구현한다.
 
 - 팔 관절 6축 + 그리퍼 1축 (서보 총 7개). 카르테시안 IK는 팔 6축만 사용하고, 그리퍼는 독립 축이다.
-- UI / 기구학 / 하드웨어 / **뷰어**를 모듈로 분리한다. IK·시리얼·제어 루프는 프로젝트 루트 `motion/` 에 두고, 이 폴더는 GUI(`gui_app.py`, `visualizer.py`)와 URDF만 둔다. GUI는 속도·목표 포즈 명령만 넣고, 제어 루프는 관절각 `q`와 끝단 상태만 돌려준다. IK는 뷰어 안에 두지 않는다.
+- UI / 기구학 / 하드웨어 / **뷰어**를 모듈로 분리한다. IK·시리얼·제어 루프는 프로젝트 루트 `motion/` 에 둔다. `pendant/` 는 조그 GUI(`gui_app.py`)와 사물 패널(`teach_grasp.py`)만 둔다. Meshcat(`motion/visualizer.py`)과 URDF·메시(`motion/robot/`)는 교육용 `Arm` 도 같이 쓰므로 `motion/` 에 있다. 팔로워 캘리브 JSON은 이 PC의 `lerobot-calibrate` 캐시다. 조그 GUI는 속도·목표 포즈 명령만 넣고, 제어 루프는 관절각 `q`와 끝단 상태만 돌려준다. IK는 뷰어 안에 두지 않는다.
 - 가상 모드에서는 로봇 없이 3D 뷰만 동작해야 한다. 실물 모드는 기존 LeRobot Feetech 버스를 감싸서 사용하며, Feetech 시리얼 프로토콜을 새로 구현하지 않는다.
-- **3D의 역할은 티칭 입력이 아니라 XYZ/RPY 디버그다.** 조그·go-to 후 TCP가 시킨 방향으로 갔는지, FK와 GUI 숫자가 맞는지 눈으로 확인한다. **첫 구현에 Meshcat 3D를 넣는다** (별도 브라우저 창). GUI와 한 창으로 합칠지, 기즈모로 집을지는 **후순위**이지, 3D 자체를 미루는 것이 아니다. 계약은 `Visualizer.display(q)`만 고정한다.
+- **조그 입력은 버튼과 숫자다.** Meshcat은 그 결과의 TCP와, `--grasp`일 때 사물 CAD를 보여 준다. 3D를 드래그해서 집을 대상은 아니다. 계약은 `Visualizer.display(q)` 이다.
 
-참고 구현(동작 검증용, 구조는 답습하지 말 것): `examples/so101_ee_gui/so101_ee_gui.py`. 이 파일은 UI·IK·모터가 한 클래스에 붙어 있다. 본 펜던트는 그 제어 튜닝(DLS 서보, 홀드 축, 스무딩, 캘리브 오프셋)만 가져오고 백엔드를 분리한다.
+조그·IK·모터는 `motion/` 에 나뉘어 있다. 사물 위치·접근 자세·랜덤 배치 계산은 `motion/grasp.py`에 있고, 사물 패널(`teach_grasp.py`)과 `motion/pick_targets.py`가 같이 호출한다. `cad/model.yaml`은 `cad/model.py`로만 읽는다.
 
 ## 2. 핵심 기술 스택 및 필수 라이브러리
 
@@ -48,16 +48,23 @@ LeRobot 워크스페이스에서 실행하는 경우 `uv run` / 기존 `lerobot`
 ### 3.2 모듈 경계 (필수)
 
 ```text
-GUI (pendant/)  ──cmd──►  motion.Controller  ──q──►  Visualizer
-                                          │
-                                          └──q──►  motion.Hardware (Real 모드만)
+gui_app.py  ──cmd──►  motion.Controller  ──q──►  Visualizer
+                                      │
+                                      └──q──►  motion.Hardware (Real 모드만)
+
+teach_grasp.py ──접근 자세──► 같은 Controller, 같은 Meshcat
+       │
+       └──등록 요청──►  yolo/pose/roi_cloud.py (--cad)
+                        (yolo/pose/register_link.py)
 ```
 
-* `gui_app.py`: 위젯과 이벤트. 로봇/Pinocchio를 import하지 않는 것을 목표로 한다. 불가피하면 얇은 콜백만.
-* `controller.py`: 조그·go-to·안전·모드 전환의 단일 루프. `q`의 소유자.
+* `gui_app.py`: 조그 위젯. Pinocchio를 직접 두지 않고 `motion` 상태만 표시한다.
+* `teach_grasp.py`: 사물 xyzrpy, grasp yaml, 접근 자세 표시, 픽 버튼. 계산은 `motion/grasp.py`. `python pendant/main.py --grasp` 로 같은 창에서 연다. 없으면 칸이 잠긴다.
+* `ui_style.py`: CustomTkinter 글꼴·테마.
+* `controller.py`: 조그·go-to·안전·모드 전환의 단일 루프. `q`의 소유자. `motion/`에 있다.
 * `robot_kinematics.py`: URDF, FK, 자코비안, DLS IK, TCP 오프셋. 모터/GUI/뷰어 모름.
 * `hw_controller.py`: `SOFollower` 래퍼. 엔코더 읽기/목표각 쓰기, 토크 on/off, 캘리브 오프셋. IK 모름.
-* `visualizer.py`: `display(q)` 퍼사드. 이번 버전 구현은 Meshcat. IK·시리얼·사용자 입력 없음.
+* `motion/visualizer.py`: `display(q)` 퍼사드. 구현은 Meshcat. IK·시리얼·조그 입력 없음. 사물 메시는 `teach_grasp.py`가 같은 뷰어에 올린다.
 
 명령(`cmd`)과 상태(`state`) 계약은 대략 다음과 같다.
 
@@ -70,9 +77,9 @@ GUI (pendant/)  ──cmd──►  motion.Controller  ──q──►  Visuali
 * Real 모드: 매 주기 엔코더 `q_meas`를 읽고, IK 시드는 `(1-α) q_cmd + α q_meas`처럼 측정값을 약하게 섞는다. 매 주기 `q_meas`로 완전히 덮어쓰지 않는다(떨림). 그리퍼만 움직일 때는 팔 IK를 다시 풀지 않는다.
 * Virtual 모드: `q_meas` 없이 `q_cmd`만 적분한다. 시작 자세는 HOME.
 
-### 3.4 3D 뷰어 — 디버그 전용, 창 통합은 후순위
+### 3.4 3D 뷰어
 
-3D는 **XYZ/RPY가 맞는지 보는 모니터**다. 조그 버튼·숫자 필드가 입력이다. 한 창 임베드, 기즈모 드래그, ghost 로봇은 Physical Labs의 티칭 UX이고 이번 범위가 아니다.
+Meshcat은 별도 브라우저 창이다. 조그 입력은 GUI 버튼·숫자이고, 3D 드래그로 목표를 넣지 않는다. `--grasp`이면 같은 Meshcat에 사물 CAD와 접근 점을 같이 그린다. 한 창 임베드와 기즈모 드래그는 하지 않는다.
 
 **이번 버전 (1차에 구현)**
 
@@ -191,7 +198,8 @@ DLS 튜닝 시작점(예제에서 검증됨, 6축에 맞게 재조정 가능): `
 * ROS 2, MoveIt, RViz
 * Feetech 패킷 파서 / 새 모터 SDK
 * placo QP 원샷 IK를 카르테시안 조그의 주 솔버로 사용
-* 카메라, 데이터셋 레코딩, 정책 추론
+* 펜던트 프로세스 안의 YOLO·카메라 루프. 물체 6D는 `yolo/pose/roi_cloud.py` 가 만들고, 사물 패널이 JSON으로 요청한다
+* 데이터셋 레코딩, 정책 추론
 * 완전 자기충돌 / 메시 충돌 (후속)
 * 뷰어 내부 IK, pybullet을 표시용으로 기동
 * 제어 루프와 1:1로 동기된 3D 프레임 (뷰어는 드롭 가능)
@@ -201,18 +209,19 @@ DLS 튜닝 시작점(예제에서 검증됨, 6축에 맞게 재조정 가능): `
 
 ```text
 pendant/
-├── main.py                 # 진입점. 스레드 기동, CLI
-├── gui_app.py              # CustomTkinter. 명령만 생산, 상태만 표시
-├── visualizer.py           # display(q) — Meshcat 구현
-├── SO101_6DOF.urdf         # 6-DOF + 메시
-├── meshes/                 # URDF가 참조하는 STL/DAE (있으면)
-└── calibration/            # Feetech JSON
+├── main.py                 # 진입점. --grasp 로 사물 패널
+├── gui_app.py              # 조그 CustomTkinter
+├── teach_grasp.py          # 사물 패널 GUI (계산은 motion/grasp.py)
+└── ui_style.py
 
-motion/                     # IK, 시리얼, 제어 루프 (이 폴더 밖)
+motion/                     # IK, 시리얼, Arm, 접근 자세(grasp.py), 픽 좌표
+├── visualizer.py           # display(q) — Meshcat
+└── robot/
+    ├── SO101_6DOF.urdf
+    └── meshes/             # URDF STL
 ```
 
-
-LeRobot 저장소 안에 둘 경우 경로는 `examples/SO101_6DOF_pendant/` 도 허용한다. 그 경우 `hw_controller`는 `lerobot.robots.so_follower`를 import한다.
+`hw_controller`는 `lerobot.robots.so_follower`를 import한다.
 
 ## 8. 완료 기준 (최소)
 

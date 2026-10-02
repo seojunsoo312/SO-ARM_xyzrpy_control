@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from yolo.config import (
     RAW_IMAGES,
     RAW_LABELS,
-    RAW_LABELS_SEG,
     add_class_argument,
     class_from_args,
     quiet_gtk,
@@ -51,7 +50,6 @@ def _undo_last(saved: list[Path]) -> None:
     path = saved.pop()
     path.unlink(missing_ok=True)
     (RAW_LABELS / f"{path.stem}.txt").unlink(missing_ok=True)
-    (RAW_LABELS_SEG / f"{path.stem}.txt").unlink(missing_ok=True)
     print(f"삭제 {path.name}  남은 {len(saved)}")
 
 

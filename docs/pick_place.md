@@ -6,8 +6,6 @@
 
 같은 창의 **픽앤플레이스(유저생성)** 은 이 시퀀스를 타지 않는다. 프로젝트 루트 `user_pickandplace.py`의 `run(arm)`을, 펜던트가 이미 쓰는 컨트롤러에 붙여 실행한다.
 
-`docs/grasp_pose_pipeline.md`의 `yolo/pick.py`와도 별개다. 그 파일은 아직 없다.
-
 ## 1. 입력
 
 좌표는 프로젝트 베이스이다. +X 앞, +Y 왼쪽, +Z 위. 위치는 mm, 자세는 roll·pitch·yaw(deg)이다.

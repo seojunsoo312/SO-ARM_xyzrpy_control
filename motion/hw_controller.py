@@ -22,11 +22,6 @@ DEFAULT_ROBOT_ID = "follower"
 SO_FOLLOWER_NAME = "so_follower"
 # Feetech Max_Torque_Limit / Torque_Limit: 0–1000 = 0–100%.
 TORQUE_LIMIT_UNITS = 1000
-BUNDLED_CALIBRATION_DIR = (
-    Path(__file__).resolve().parent.parent / "pendant" / "calibration" / "so_follower"
-)
-
-
 def grip_user_to_100(user_deg: float) -> float:
     """Pendant S7 user-deg (HOME=0) → LeRobot gripper 0–100 (HOME=50)."""
     return float(np.clip(user_deg + GRIPPER_MID, 0.0, 100.0))
@@ -44,16 +39,11 @@ def hf_calibration_dir() -> Path:
     return HF_LEROBOT_CALIBRATION / ROBOTS / SO_FOLLOWER_NAME
 
 
-def resolve_calibration_dir(explicit: Path | None, robot_id: str) -> Path:
-    """Prefer Hugging Face cache (lerobot-calibrate), else the repo JSON."""
+def resolve_calibration_dir(explicit: Path | None, _robot_id: str) -> Path:
+    """--calibration-dir, otherwise the lerobot-calibrate cache for this PC."""
     if explicit is not None:
         return Path(explicit)
-    cache_dir = hf_calibration_dir()
-    if (cache_dir / f"{robot_id}.json").is_file():
-        return cache_dir
-    if (BUNDLED_CALIBRATION_DIR / f"{robot_id}.json").is_file():
-        return BUNDLED_CALIBRATION_DIR
-    return cache_dir
+    return hf_calibration_dir()
 
 
 def _enter_offsets_deg(calibration: dict) -> dict[str, float]:

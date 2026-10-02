@@ -17,7 +17,7 @@ from motion.base_frame import (
     xyz_user_from_urdf,
 )
 from motion.hw_controller import Hardware
-from motion.pose_server import POSE_URL, PoseServer
+from motion.pose_server import PoseServer
 from motion.robot_kinematics import (
     ARM_JOINT_NAMES,
     DEG2RAD,
@@ -158,7 +158,6 @@ class Controller:
             self._pose_server = PoseServer(self.handeye_payload)
             try:
                 self._pose_server.start()
-                print(f"hand-eye pose  {POSE_URL}")
             except OSError as exc:
                 self._pose_server = None
                 print(f"hand-eye pose server failed ({exc})")

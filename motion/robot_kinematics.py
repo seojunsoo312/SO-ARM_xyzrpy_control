@@ -9,6 +9,10 @@ import coal
 import numpy as np
 import pinocchio as pin
 
+# 팔 설계도와 부품 STL. URDF 의 package://meshes/ 는 이 폴더의 meshes/ 이다.
+ROBOT_DIR = Path(__file__).resolve().parent / "robot"
+DEFAULT_URDF = ROBOT_DIR / "SO101_6DOF.urdf"
+
 # URDF S1..S7 = Feetech ID 1..7 (jog-confirmed on Meshcat).
 URDF_JOINT_NAMES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7")
 ARM_JOINT_NAMES = ("S1", "S2", "S3", "S4", "S5", "S6")

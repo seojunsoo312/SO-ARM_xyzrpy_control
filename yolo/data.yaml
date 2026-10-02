@@ -3,6 +3,6 @@ train: datasets/splits/train.txt
 val: datasets/splits/val.txt
 nc: 3
 names:
-  0: stand
-  1: lie
-  2: slant
+  0: 세우기
+  1: 눕히기
+  2: 비스듬히

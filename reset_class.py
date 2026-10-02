@@ -3,11 +3,11 @@
 
 목록을 보여 준 뒤 yes 를 입력해야 지운다. -y 는 확인을 건너뛴다.
 
-  python pendant/reset_class.py --yolo
-  python pendant/reset_class.py --calib
-  python pendant/reset_class.py --ply
-  python pendant/reset_class.py --all
-  python pendant/reset_class.py --all -y       # 확인 생략
+  python reset_class.py --yolo
+  python reset_class.py --calib
+  python reset_class.py --ply
+  python reset_class.py --all
+  python reset_class.py --all -y       # 확인 생략
 """
 
 from __future__ import annotations
@@ -17,8 +17,7 @@ import shutil
 import sys
 from pathlib import Path
 
-PENDANT = Path(__file__).resolve().parent
-PROJECT = PENDANT.parent
+PROJECT = Path(__file__).resolve().parent
 
 YOLO = PROJECT / "yolo"
 VISION = PROJECT / "vision"
@@ -70,15 +69,12 @@ def targets_yolo() -> list[Path]:
     items: list[Path] = []
     items.extend(_collect_files(raw / "images", ("*.jpg", "*.jpeg", "*.png")))
     items.extend(_collect_files(raw / "labels", ("*.txt", "*.cache")))
-    items.extend(_collect_tree(raw / "labels_seg"))
     items.extend(_collect_tree(YOLO / "datasets" / "splits"))
-    items.extend(_collect_tree(YOLO / "datasets" / "seg"))
     items.extend(_collect_tree(YOLO / "datasets" / "custom"))
     items.extend(_collect_tree(YOLO / "runs"))
-    for name in ("best.pt", "best-seg.pt"):
-        pt = YOLO / "weights" / name
-        if pt.is_file():
-            items.append(pt)
+    pt = YOLO / "weights" / "best.pt"
+    if pt.is_file():
+        items.append(pt)
     items.extend(_collect_files(YOLO / "datasets", ("**/*.cache",)))
     return _unique(items)
 
@@ -136,8 +132,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "예:\n"
-            "  python pendant/reset_class.py --all\n"
-            "  python pendant/reset_class.py --all -y\n"
+            "  python reset_class.py --all\n"
+            "  python reset_class.py --all -y\n"
         ),
     )
     scope = parser.add_argument_group("범위 (하나 이상)")
