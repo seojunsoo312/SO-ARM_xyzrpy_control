@@ -13,9 +13,9 @@
 
 ```bash
 # 터미널 1 (카메라)
-conda activate AIvision && cd ~/Project && python yolo/pose/roi_cloud.py
+conda activate AIvision && cd ~/AIvision && python yolo/pose/roi_cloud.py
 # 터미널 2 (팔)
-conda activate AIvision && cd ~/Project && python pendant/main.py --grasp
+conda activate AIvision && cd ~/AIvision && python pendant/main.py --grasp
 ```
 
 ## 1. 준비물
@@ -56,9 +56,9 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ```bash
 cd ~
-git clone https://github.com/seojunsoo312/SO-ARM_xyzrpy_control.git Project
+git clone https://github.com/seojunsoo312/SO-ARM_xyzrpy_control.git AIvision
 # ARM64 SDK 압축을 홈에 풀기 → ~/OrbbecSDK_v1.10.xx_... 또는 ~/OrbbecViewer_v1.10.xx_...
-mkdir -p ~/Project/yolo/weights && cp /media/$USER/<USB>/best.pt ~/Project/yolo/weights/
+mkdir -p ~/AIvision/yolo/weights && cp /media/$USER/<USB>/best.pt ~/AIvision/yolo/weights/
 
 # 카메라 USB 권한: SDK 의 설치 스크립트가 규칙 복사와 다시 불러오기를 한다.
 find ~/Orbbec* -name install_udev_rules.sh
@@ -119,7 +119,7 @@ python -c "import numpy; print(numpy.__version__)"                              
 python -c "import lerobot.robots.so_follower as m, inspect; print('dof_mode' in inspect.signature(m.SO101FollowerConfig).parameters)"  # True
 python -c "import cv2; cv2.namedWindow('t'); print('cv2 gui ok')"
 python -c "import ultralytics, open3d, pinocchio, coal, meshcat, customtkinter; print('ok')"
-cd ~/Project && python -c "from motion import Arm; a = Arm(); print(a.where()); a.close()"
+cd ~/AIvision && python -c "from motion import Arm; a = Arm(); print(a.where()); a.close()"
 ```
 
 마지막 줄은 브라우저에 가상 팔이 뜨면 성공입니다.
@@ -160,7 +160,7 @@ ls -l /dev/so101_*
 
 ## 7. 수업 흐름 한 번 돌려 보기 (마스터에서)
 
-모두 `AIvision` 환경, `~/Project`에서 실행합니다.
+모두 `AIvision` 환경, `~/AIvision`에서 실행합니다.
 
 | 순서 | 명령 |
 |---|---|
@@ -197,7 +197,7 @@ ls -l /dev/so101_*
 코드를 고친 뒤 보드마다:
 
 ```bash
-cd ~/Project && git pull
+cd ~/AIvision && git pull
 ```
 
 - lerobot fork를 바꾸면 `docs/requirements.txt`와 이 문서의 커밋 번호를 바꾸고, 보드마다 5번 2)를 새 번호로 다시 실행합니다.

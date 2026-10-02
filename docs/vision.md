@@ -4,7 +4,7 @@
 
 ## 실행
 
-카메라를 쓰려면 Orbbec SDK(`OrbbecViewer_*` 또는 `OrbbecSDK_*` 폴더)가 프로젝트 폴더와 같은 곳에 있어야 합니다. 예를 들어 프로젝트가 `~/Project`이면 SDK는 `~/OrbbecViewer_...`입니다. 코드는 그 폴더 바로 아래나 `lib/` 아래의 `libOrbbecSDK.so`를 씁니다. 노트북은 x64판, Jetson은 ARM64판이어야 합니다(`docs/jetson_setup.md`). 이 폴더는 git에 없습니다. 다른 곳에 두려면 환경변수 `ORBBEC_SDK_DIR`에 그 경로를 적습니다.
+카메라를 쓰려면 Orbbec SDK(`OrbbecViewer_*` 또는 `OrbbecSDK_*` 폴더)가 프로젝트 폴더와 같은 곳에 있어야 합니다. 예를 들어 프로젝트가 `~/AIvision`이면 SDK는 `~/OrbbecViewer_...`입니다. 코드는 그 폴더 바로 아래나 `lib/` 아래의 `libOrbbecSDK.so`를 씁니다. 노트북은 x64판, Jetson은 ARM64판이어야 합니다(`docs/jetson_setup.md`). 이 폴더는 git에 없습니다. 다른 곳에 두려면 환경변수 `ORBBEC_SDK_DIR`에 그 경로를 적습니다.
 
 SDK가 없으면 카메라를 쓰는 명령(`yolo/pose/roi_cloud.py`, 촬영, 손눈 캘리브)이 「SDK 없음」으로 멈춥니다. 펜던트와 가상 `Arm()`은 SDK 없이도 됩니다.
 
