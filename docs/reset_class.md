@@ -31,7 +31,7 @@ python reset_class.py --all -y    # 물어보지 않고 바로 삭제
 | `yolo/weights/best.pt`                        | 우리가 학습한 가중치             |
 
 
-학습에 필요한 코드, CAD, 시작 가중치 `yolo11n.pt`는 남습니다.
+학습에 필요한 코드, CAD, 시작 가중치 `yolo11n.pt`(있으면)는 남습니다.
 
 
 

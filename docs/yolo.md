@@ -54,7 +54,7 @@ python yolo/pose/roi_cloud.py                # 점군을 CAD와 맞춰 로봇 �
 | `pose/view/view_cad.py` | `cad/` STL 축을 보여 줍니다. |
 | `pose/view/view_cloud.py` | 저장한 ply를 보여 줍니다. |
 | `datasets/` | 사진, 라벨, 학습 목록. |
-| `weights/` | `best.pt`와 시작 가중치 `yolo11n.pt`. |
+| `weights/` | `best.pt`. 시작 가중치 `yolo11n.pt`는 없으면 처음 학습할 때 ultralytics가 받습니다. |
 | `runs/` | 학습 로그, `roi/`의 ply와 등록 요청·상태 JSON. |
 
 ## 같이 쓰는 곳

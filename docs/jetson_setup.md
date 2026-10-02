@@ -23,8 +23,9 @@ conda activate AIvision && cd ~/Project && python pendant/main.py --grasp
 - JetPack 6을 올린 Jetson (Ubuntu 22.04). 버전 확인: `cat /etc/nv_tegra_release` → `R36`
 - 인터넷 연결 (설치하는 동안만)
 - **ARM64용** Orbbec SDK v1.10 패키지. 노트북의 `..._linux_x64_release`는 Jetson에서 안 됩니다. [OrbbecSDK releases](https://github.com/orbbec/OrbbecSDK/releases)에서 `arm64`(또는 `aarch64`) 판을 받습니다.
-- 노트북의 `yolo/weights/best.pt`, `yolo/weights/yolo11n.pt` (git에 없음. USB로 복사)
-- 노트북의 `/etc/udev/rules.d/99-obsensor-libusb.rules` (카메라 USB 권한. USB로 복사)
+- 노트북의 `yolo/weights/best.pt` (학습한 가중치. git에 없음. USB로 복사). 이것 하나만 옮깁니다.
+  - 시작 가중치 `yolo11n.pt`는 옮기지 않습니다. 처음 학습할 때 ultralytics가 인터넷에서 받습니다.
+  - 카메라 USB 권한 파일 `99-obsensor-libusb.rules`도 옮기지 않습니다. SDK 압축 안 `script/`에 들어 있습니다.
 
 ## 2. 보드 기본 설정
 
@@ -57,14 +58,18 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 cd ~
 git clone https://github.com/seojunsoo312/SO-ARM_xyzrpy_control.git Project
 # ARM64 SDK 압축을 홈에 풀기 → ~/OrbbecSDK_v1.10.xx_... 또는 ~/OrbbecViewer_v1.10.xx_...
-mkdir -p ~/Project/yolo/weights && cp /media/$USER/<USB>/best.pt /media/$USER/<USB>/yolo11n.pt ~/Project/yolo/weights/
-sudo cp /media/$USER/<USB>/99-obsensor-libusb.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
+mkdir -p ~/Project/yolo/weights && cp /media/$USER/<USB>/best.pt ~/Project/yolo/weights/
+
+# 카메라 USB 권한: SDK 의 설치 스크립트가 규칙 복사와 다시 불러오기를 한다.
+find ~/Orbbec* -name install_udev_rules.sh
+sudo <위에서 나온 경로>
 ```
+
+`find`가 아무것도 찍지 않으면 노트북의 `/etc/udev/rules.d/99-obsensor-libusb.rules`를 USB로 옮겨 같은 위치에 넣고 `sudo udevadm control --reload-rules && sudo udevadm trigger`를 합니다.
 
 다른 위치에 SDK를 두면 `export ORBBEC_SDK_DIR=<그 폴더>`를 `~/.bashrc`에 적습니다.
 
-**확인**: `find ~/Orbbec* -name "libOrbbecSDK.so*" | head -1`이 경로를 찍음. 카메라를 꽂고 `lsusb | grep 2bc5`가 두 줄.
+**확인**: `find ~/Orbbec* -name "libOrbbecSDK.so*" | head -1`이 경로를 찍음. `ls /etc/udev/rules.d/99-obsensor-libusb.rules`가 있음. 카메라를 꽂고 `lsusb | grep 2bc5`가 두 줄.
 
 ## 4. conda 설치
 

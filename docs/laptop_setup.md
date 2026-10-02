@@ -19,7 +19,7 @@ sudo apt install -y git build-essential fonts-noto-cjk tk8.6 libtk8.6
 sudo usermod -aG dialout,video $USER
 ```
 
-카메라 USB 권한(`/etc/udev/rules.d/99-obsensor-libusb.rules`)과 팔 시리얼 이름(`99-serial.rules`)은 `docs/jetson_setup.md` 3번, 6번과 같습니다.
+카메라 USB 권한(`/etc/udev/rules.d/99-obsensor-libusb.rules`, SDK의 `script/install_udev_rules.sh`로 설치)과 팔 시리얼 이름(`99-serial.rules`)은 `docs/jetson_setup.md` 3번, 6번과 같습니다.
 
 ## 2. 카메라 SDK
 
