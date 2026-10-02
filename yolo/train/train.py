@@ -67,7 +67,7 @@ def main() -> None:
         raise SystemExit(
             "ultralytics 가 이 파이썬에 없습니다.\n"
             f"지금 실행: {sys.executable}\n"
-            "conda activate lerobot 한 뒤, /bin/python 말고:\n"
+            "conda activate AIvision 한 뒤, /bin/python 말고:\n"
             "  python yolo/train/train.py"
         )
 

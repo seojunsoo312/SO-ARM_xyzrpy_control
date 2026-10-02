@@ -6,16 +6,16 @@
 
 ## 0. 먼저 알아 둘 것
 
-- 환경은 **`lerobot` 하나, Python 3.10** 입니다. 펜던트, 노트북 실습, 카메라 창, YOLO 학습, 손눈 캘리브를 모두 여기서 실행합니다.
+- 환경은 **`AIvision` 하나, Python 3.10** 입니다. 펜던트, 노트북 실습, 카메라 창, YOLO 학습, 손눈 캘리브를 모두 여기서 실행합니다.
 - 왜 3.10인가: Jetson용 GPU PyTorch(`pypi.jetson-ai-lab.io/jp6/cu126`)는 Python 3.10용만 있습니다. 7축 lerobot fork는 3.10에서 돌도록 고친 브랜치(`feat/so101-7dof-py310`)를 씁니다.
 - **conda로는 Python만** 만듭니다. numpy 같은 패키지를 conda로 받으면 Jetson의 수학 라이브러리(NVPL)와 엮여 `libcblas.so.3: undefined symbol: nvpl_blas_core_...`로 numpy가 깨집니다. 나머지는 전부 pip로 깝니다.
-- 수업에서는 터미널 두 개를 씁니다. 하나는 카메라 창, 하나는 펜던트나 노트북입니다. 둘 다 같은 `lerobot` 환경입니다.
+- 수업에서는 터미널 두 개를 씁니다. 하나는 카메라 창, 하나는 펜던트나 노트북입니다. 둘 다 같은 `AIvision` 환경입니다.
 
 ```bash
 # 터미널 1 (카메라)
-conda activate lerobot && cd ~/Project && python yolo/pose/roi_cloud.py
+conda activate AIvision && cd ~/Project && python yolo/pose/roi_cloud.py
 # 터미널 2 (팔)
-conda activate lerobot && cd ~/Project && python pendant/main.py --grasp
+conda activate AIvision && cd ~/Project && python pendant/main.py --grasp
 ```
 
 ## 1. 준비물
@@ -76,17 +76,17 @@ bash Miniforge3-Linux-aarch64.sh -b -p ~/miniforge3
 ~/miniforge3/bin/conda init bash && exec bash
 ```
 
-## 5. `lerobot` 환경 (Python 3.10)
+## 5. `AIvision` 환경 (Python 3.10)
 
-예전에 만든 `lerobot` 환경(3.12 등)이 있으면 지우고 새로 만듭니다. 노트북 실습의 커널 이름이 `lerobot`이라 이름은 그대로 씁니다.
+예전에 만든 `lerobot` 환경(3.12 등)이 있으면 지우고, `AIvision`으로 새로 만듭니다. 노트북 실습 커널 이름도 `AIvision`입니다.
 
 순서가 중요합니다. **GPU torch를 먼저** 깔아야 lerobot과 ultralytics가 다른 torch를 받아 오지 않습니다.
 
 ```bash
 conda deactivate
-conda env remove -y -n lerobot          # 있을 때만
-conda create -y -n lerobot python=3.10  # Python 만. 다른 패키지는 conda 로 받지 않는다.
-conda activate lerobot
+conda env remove -y -n lerobot          # 예전 lerobot 환경이 있을 때만
+conda create -y -n AIvision python=3.10  # Python 만. 다른 패키지는 conda 로 받지 않는다.
+conda activate AIvision
 
 # 1) Jetson GPU torch. JetPack 6(CUDA 12.6)용 저장소. lerobot fork 는 torch>=2.7,<2.11.
 pip install torch==2.8.0 torchvision==0.23.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
@@ -100,7 +100,7 @@ pip install opencv-python
 
 # 4) 나머지. torch 는 이미 있으니 다시 받지 않는다.
 pip install ultralytics open3d pin meshcat customtkinter Pillow jupyter ipykernel
-python -m ipykernel install --user --name lerobot --display-name lerobot
+python -m ipykernel install --user --name AIvision --display-name AIvision
 ```
 
 - 3)을 빼면 카메라 창에서 `cv2.imshow` 오류("The function is not implemented")가 납니다.
@@ -149,13 +149,13 @@ ls -l /dev/so101_*
 
 ### 리더·팔로워 캘리브
 
-`lerobot` 환경에서 `lerobot-calibrate`로 합니다(7축, id는 `follower`, `leader`). 결과는 이 보드의 `~/.cache/huggingface/lerobot/calibration/robots/so_follower/follower.json`, `.../teleoperators/so_leader/leader.json`에 저장되고, 펜던트 Connect가 그 파일을 읽습니다. 팔마다 다르므로 보드 사이에 복사하지 않습니다.
+`AIvision` 환경에서 `lerobot-calibrate`로 합니다(7축, id는 `follower`, `leader`). 결과는 이 보드의 `~/.cache/huggingface/lerobot/calibration/robots/so_follower/follower.json`, `.../teleoperators/so_leader/leader.json`에 저장되고, 펜던트 Connect가 그 파일을 읽습니다. 팔마다 다르므로 보드 사이에 복사하지 않습니다.
 
 **확인**: `python pendant/main.py` → Connect → 팔이 튀지 않고 지금 자세에서 조그가 됨.
 
 ## 7. 수업 흐름 한 번 돌려 보기 (마스터에서)
 
-모두 `lerobot` 환경, `~/Project`에서 실행합니다.
+모두 `AIvision` 환경, `~/Project`에서 실행합니다.
 
 | 순서 | 명령 |
 |---|---|

@@ -38,7 +38,7 @@ def _require_o3d():
         import open3d as o3d
     except ImportError as exc:
         raise SystemExit(
-            "open3d가 없습니다. conda activate lerobot 한 뒤 설치하세요."
+            "open3d가 없습니다. conda activate AIvision 한 뒤 설치하세요."
         ) from exc
     return o3d
 

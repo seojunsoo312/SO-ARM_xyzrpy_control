@@ -141,7 +141,7 @@ def main() -> None:
         import open3d as o3d  # noqa: F401
     except ImportError as exc:
         raise SystemExit(
-            "open3d가 없습니다. conda activate lerobot 한 뒤 설치하세요."
+            "open3d가 없습니다. conda activate AIvision 한 뒤 설치하세요."
         ) from exc
 
     path = _resolve_mesh(args.mesh)

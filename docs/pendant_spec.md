@@ -36,7 +36,7 @@ pip install pin customtkinter meshcat numpy
 # 또는 conda-forge: conda install -c conda-forge pinocchio
 ```
 
-LeRobot 워크스페이스에서 실행하는 경우 `uv run` / 기존 `lerobot` 환경을 우선한다. 실물 모드는 `lerobot`의 Feetech extra가 필요하다.
+LeRobot 워크스페이스에서 실행하는 경우 `uv run` / 기존 `AIvision` 환경을 우선한다. 실물 모드는 `lerobot`의 Feetech extra가 필요하다.
 
 ## 3. 전체 시스템 아키텍처
 

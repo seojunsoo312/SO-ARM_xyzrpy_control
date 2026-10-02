@@ -1395,7 +1395,7 @@ def main() -> None:
         import open3d as o3d  # noqa: F401
     except ImportError as exc:
         raise SystemExit(
-            "customtkinter / open3d 가 필요합니다. conda activate lerobot"
+            "customtkinter / open3d 가 필요합니다. conda activate AIvision"
         ) from exc
 
     from motion import Controller, DEFAULT_URDF, RobotKinematics

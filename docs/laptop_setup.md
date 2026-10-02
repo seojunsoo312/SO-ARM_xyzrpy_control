@@ -25,13 +25,13 @@ sudo usermod -aG dialout,video $USER
 
 x64 Orbbec SDK(`OrbbecViewer_v1.10.xx_..._linux_x64_release`)를 프로젝트 폴더와 같은 곳(홈)에 풉니다. 코드는 프로젝트 옆에서 찾습니다(`docs/vision.md`).
 
-## 3. `lerobot` 환경 (Python 3.10)
+## 3. `AIvision` 환경 (Python 3.10)
 
 conda로는 Python만 만들고 나머지는 pip로 깝니다. **torch를 먼저** 깝니다.
 
 ```bash
-conda create -y -n lerobot python=3.10
-conda activate lerobot
+conda create -y -n AIvision python=3.10
+conda activate AIvision
 
 # 1) 노트북 GPU torch. Jetson 과 같은 2.8.
 pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
@@ -45,7 +45,7 @@ pip install opencv-python
 
 # 4) 나머지
 pip install ultralytics open3d pin meshcat customtkinter Pillow jupyter ipykernel
-python -m ipykernel install --user --name lerobot --display-name lerobot
+python -m ipykernel install --user --name AIvision --display-name AIvision
 
 # 5) lerobot 이 torch 2.10 용 torchcodec 0.10 을 깐다. torch 2.8 에 맞는 0.7 로 바꾼다.
 #    (Jetson 에는 torchcodec 이 깔리지 않으므로 이 줄이 없다)

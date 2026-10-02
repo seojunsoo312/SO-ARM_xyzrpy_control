@@ -5,7 +5,7 @@
 열리면 Orbbec filters 창이 같이 뜬다 (Color exposure/gain 등).
 
   프로젝트 루트에서
-  conda activate lerobot
+  conda activate AIvision
   python yolo/train/capture.py
 """
 
