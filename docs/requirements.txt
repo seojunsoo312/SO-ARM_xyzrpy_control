@@ -4,7 +4,9 @@
 # 이 보드(Jetson)에서는 pip로 받지 않는다.
 #   pinocchio, coal  conda install -c conda-forge pinocchio
 #   torch            이 보드용 휠. 설치 순서는 나중에 스크립트로 묶는다.
-#   lerobot          실기 Connect. Feetech extra 가 있는 환경
+#   lerobot          실기 Connect. 관절(elbow_roll)을 하나 더한 7축 fork 를 쓴다. 원본 lerobot 은 안 된다.
+#                    torch 를 먼저 깐 뒤 아래 한 줄. 커밋을 고정해 모든 보드가 같은 버전을 쓴다.
+#                    pip install "lerobot[feetech] @ git+https://github.com/seojunsoo312/lerobot.git@7b994cdd"
 
 numpy
 opencv-python

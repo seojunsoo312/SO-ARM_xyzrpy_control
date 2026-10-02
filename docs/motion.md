@@ -18,7 +18,7 @@ from motion import Arm, load_pick_targets
 | `controller.py` | 조그와 이동을 반복하는 루프. 펜던트 버튼이 여기에 명령을 넣습니다. |
 | `robot_kinematics.py` | URDF로 팔 끝 위치를 구하고, 목표 위치로 관절 각을 계산합니다. |
 | `base_frame.py` | 사람이 쓰는 좌표(+X 앞, +Y 왼쪽, +Z 위)와 URDF 좌표를 바꿉니다. |
-| `hw_controller.py` | 실기 모터 연결. 이 PC의 `lerobot-calibrate` 캘리브를 읽습니다. |
+| `hw_controller.py` | 실기 모터 연결. 이 PC의 `lerobot-calibrate` 캘리브를 읽습니다. 관절을 하나 더한 lerobot fork(`seojunsoo312/lerobot`, 설치는 `docs/requirements.txt`)가 있어야 합니다. |
 | `pick_place.py` | 집어서 다른 자리에 놓는 순서. 펜던트 픽 버튼이 이 단계를 실행합니다. |
 | `grasp.py` | 물체 자세에서 대기·집기 TCP를 계산합니다. 물체 축/베이스 RPY 변환, 랜덤 배치, 물체-팔 겹침도 여기 있습니다. 창은 없습니다. |
 | `pick_targets.py` | 카메라에 물건 등록을 요청하고, 대기·집기·놓기 좌표를 만듭니다. |
