@@ -1,12 +1,14 @@
 # 프로젝트 공통 패키지. pendant, motion, vision, yolo 가 같이 쓴다.
+# 노트북(x86)용 목록이다. Jetson 은 설치 순서가 다르다(GPU torch, Python 3.10) → docs/jetson_setup.md
 #   pip install -r docs/requirements.txt
 #
-# 이 보드(Jetson)에서는 pip로 받지 않는다.
-#   pinocchio, coal  conda install -c conda-forge pinocchio
-#   torch            이 보드용 휠. 설치 순서는 나중에 스크립트로 묶는다.
+# 따로 까는 것.
+#   pinocchio, coal  pip install pin  (또는 conda install -c conda-forge pinocchio)
+#   torch            PC 는 pytorch.org, Jetson 은 docs/jetson_setup.md
 #   lerobot          실기 Connect. 관절(elbow_roll)을 하나 더한 7축 fork 를 쓴다. 원본 lerobot 은 안 된다.
-#                    torch 를 먼저 깐 뒤 아래 한 줄. 커밋을 고정해 모든 보드가 같은 버전을 쓴다.
-#                    pip install "lerobot[feetech] @ git+https://github.com/seojunsoo312/lerobot.git@7b994cdd"
+#                    feat/so101-7dof-py310 브랜치(Python 3.10 이상). 커밋을 고정해 모든 보드가 같은 버전을 쓴다.
+#                    torch 를 먼저 깐 뒤 아래 한 줄, 그다음 opencv-python-headless 를 opencv-python 으로 바꾼다.
+#                    pip install "lerobot[feetech] @ git+https://github.com/seojunsoo312/lerobot.git@f8e76c068ed4058e0504642ff9da8ea226032c54"
 
 numpy
 opencv-python

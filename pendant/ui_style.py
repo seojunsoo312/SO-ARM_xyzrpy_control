@@ -12,7 +12,8 @@ import os
 import sys
 from pathlib import Path
 
-_SYS_TK = Path("/usr/lib/x86_64-linux-gnu/libtk8.6.so")
+# 노트북은 x86_64-linux-gnu, Jetson 은 aarch64-linux-gnu.
+_SYS_TK = next(iter(sorted(Path("/usr/lib").glob("*-linux-gnu/libtk8.6.so"))), Path("/usr/lib/libtk8.6.so"))
 _SYS_TK_LIB = Path("/usr/share/tcltk/tk8.6")
 _SYS_TCL_LIB = Path("/usr/share/tcltk/tcl8.6")
 

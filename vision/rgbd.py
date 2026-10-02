@@ -73,28 +73,29 @@ def _jpeg_complete(raw: np.ndarray) -> bool:
     tail = raw[-64:] if raw.size > 64 else raw
     return bool(np.any((tail[:-1] == 0xFF) & (tail[1:] == 0xD9)))
 EP = POINTER(c_void_p)
-_SDK_SO_NAMES = (
-    "libOrbbecSDK.so.1.10",
-    "libOrbbecSDK.so.1.10.27",
-    "libOrbbecSDK.so",
-)
+# 노트북(x64) Viewer 는 폴더 바로 아래, ARM64(Jetson) 패키지는 lib/ 아래에 둔다.
+_SDK_SO_DIRS = (".", "lib", "lib/*")
 
 
 def _sdk_so(sdk: Path) -> Path | None:
-    for name in _SDK_SO_NAMES:
-        path = sdk / name
-        if path.is_file():
-            return path
+    """libOrbbecSDK.so(버전 번호 붙은 것 포함). 짧은 이름을 먼저."""
+    for sub in _SDK_SO_DIRS:
+        hits = sorted(sdk.glob(f"{sub}/libOrbbecSDK.so*"), key=lambda p: len(p.name))
+        for path in hits:
+            if path.is_file():
+                return path
     return None
 
 
 def resolve_sdk_dir() -> Path:
-    """ORBBEC_SDK_DIR, 없으면 프로젝트 폴더와 같은 곳의 OrbbecViewer_*."""
+    """ORBBEC_SDK_DIR, 없으면 프로젝트 폴더와 같은 곳의 OrbbecViewer_* / OrbbecSDK_*."""
     env = os.environ.get("ORBBEC_SDK_DIR")
     if env:
         return Path(env).expanduser()
     parent = Path(__file__).resolve().parents[2]
-    candidates = sorted(parent.glob("OrbbecViewer_*"), reverse=True)
+    candidates = sorted(
+        [*parent.glob("OrbbecViewer_*"), *parent.glob("OrbbecSDK_*")], reverse=True
+    )
     for candidate in candidates:
         if _sdk_so(candidate) is not None:
             return candidate
@@ -106,7 +107,8 @@ def _require_sdk(sdk: Path) -> Path:
     if so is None:
         raise RuntimeError(
             f"SDK 없음: {sdk}\n"
-            "OrbbecViewer 폴더를 풀었으면 ORBBEC_SDK_DIR 로 그 경로를 지정하세요."
+            "OrbbecViewer_* / OrbbecSDK_* 폴더를 프로젝트 폴더 옆에 두거나 "
+            "ORBBEC_SDK_DIR 로 그 경로를 지정하세요."
         )
     return so
 
@@ -287,7 +289,7 @@ def read_factory_intrinsics(
     method = ""
     param: OBCameraParam | None = None
     try:
-        lib = CDLL(f"./{so.name}", mode=RTLD_GLOBAL)
+        lib = CDLL(str(so.resolve()), mode=RTLD_GLOBAL)
         _no_file_log(lib, sdk)
         create = _bind(lib, "ob_create_pipeline", c_void_p, EP)
         get_dev = _bind(lib, "ob_pipeline_get_device", c_void_p, c_void_p, EP)
@@ -452,7 +454,7 @@ class OrbbecV1:
         cwd = os.getcwd()
         os.chdir(sdk)
         try:
-            self.lib = CDLL(f"./{so.name}", mode=RTLD_GLOBAL)
+            self.lib = CDLL(str(so.resolve()), mode=RTLD_GLOBAL)
             _no_file_log(self.lib, sdk)
             L = self.lib
             self._create = _bind(L, "ob_create_pipeline", c_void_p, EP)
