@@ -142,7 +142,8 @@ def _meshcat_viewer_root(title: str) -> str:
             text = text.replace("<title>MeshCat</title>", f"<title>{html.escape(title)}</title>", 1)
             target.write_text(text, encoding="utf-8")
         elif path.is_file():
-            os.symlink(path, target)
+            # Copy, not symlink: tornado >= 6.5 answers 403 for symlinks leaving the root.
+            shutil.copy2(path, target)
     return str(dst)
 
 
