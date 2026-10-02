@@ -1,5 +1,5 @@
 # 프로젝트 공통 패키지. pendant, motion, vision, yolo 가 같이 쓴다.
-# 노트북(x86)용 목록이다. Jetson 은 설치 순서가 다르다(GPU torch, Python 3.10) → docs/jetson_setup.md
+# 설치 순서는 노트북 docs/laptop_setup.md, Jetson docs/jetson_setup.md (둘 다 Python 3.10).
 #   pip install -r docs/requirements.txt
 #
 # 따로 까는 것.
