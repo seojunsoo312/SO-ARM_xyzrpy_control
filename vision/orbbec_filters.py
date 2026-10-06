@@ -12,6 +12,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from vision.text import put_text
+
 FILTER_WIN = "Orbbec filters"
 NOISE_MIN_DIFF_DEFAULT = 10000
 NOISE_MAX_SIZE_DEFAULT = 1
@@ -326,9 +328,7 @@ class OrbbecFilterPanel:
         cv2.circle(img, (cx, (y0 + y1) // 2), 7, (230, 230, 230), -1, cv2.LINE_AA)
 
     def _text(self, img, text, org, color=(235, 235, 235), scale=0.52, thick=1) -> None:
-        cv2.putText(
-            img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA
-        )
+        put_text(img, text, org, scale, color, thick)
 
     def _draw(self) -> None:
         img = np.full((self._h, self.W, 3), 32, dtype=np.uint8)

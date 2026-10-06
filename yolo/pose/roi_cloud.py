@@ -27,6 +27,7 @@ quiet_gtk()
 
 from vision.calib import intrinsics_for_rotate180, load_K, load_T_base_cam
 from vision.camera import FRAME_HEIGHT, FRAME_WIDTH, ROTATE_180
+from vision.text import put_text
 from vision.transforms import invert_T, plane_tilt_from_z_deg, transform_plane
 from vision.orbbec_filters import (
     NOISE_MAX_SIZE_DEFAULT,
@@ -397,6 +398,12 @@ def main() -> None:
         help="점군 중심이 이만큼 움직여야 ICP를 다시 함. 정지 시 축 고정",
     )
     parser.add_argument(
+        "--box",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="YOLO 박스를 화면에 그림. 기본 켜짐. 끄려면 --no-box",
+    )
+    parser.add_argument(
         "--no-noise-filter",
         action="store_true",
         help="Orbbec NoiseRemovalFilter 끄기. 기본은 켜짐",
@@ -643,7 +650,7 @@ def main() -> None:
                         cad_full_done = True
 
             for i, inst in enumerate(instances):
-                x1, y1 = [int(v) for v in inst.xyxy[:2]]
+                x1, y1, x2, y2 = [int(v) for v in inst.xyxy[:4]]
                 color = (0, 255, 255) if i == chosen else (0, 180, 0)
                 tag_x, tag_y = x1, max(16, y1 - 6)
                 pose = (
@@ -652,16 +659,12 @@ def main() -> None:
                     else "?"
                 )
                 pose_color = _POSE_BGR.get(inst.class_id, color)
-                cv2.putText(
-                    bgr,
-                    pose,
-                    (tag_x, tag_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    pose_color,
-                    2,
-                    cv2.LINE_AA,
-                )
+                if args.box:
+                    # 고른(가장 위) 물체는 굵게
+                    cv2.rectangle(
+                        bgr, (x1, y1), (x2, y2), pose_color, 2 if i == chosen else 1, cv2.LINE_AA
+                    )
+                put_text(bgr, pose, (tag_x, tag_y), 0.6, pose_color, 2)
 
             ztxt = ""
             if len(last_xyz):
@@ -680,16 +683,14 @@ def main() -> None:
             pose_txt = ""
             if chosen is not None and instances[chosen].class_id is not None:
                 pose_txt = "  " + pose_name(instances[chosen].class_id, korean=True)
-            cv2.putText(
+            put_text(
                 bgr,
                 f"n={n_det} sel={0 if chosen is None else chosen}{pose_txt}"
                 f"{ztxt}{ctxt} {plane_text} {frame_name} {hint}",
                 (8, 24),
-                cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
                 (0, 255, 0),
                 1,
-                cv2.LINE_AA,
             )
             if args.cad:
                 place_font = 0.58
@@ -740,16 +741,7 @@ def main() -> None:
                 for y, text, color in overlay_lines:
                     if not text:
                         continue
-                    cv2.putText(
-                        bgr,
-                        text,
-                        (8, y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        place_font,
-                        color,
-                        place_thick,
-                        cv2.LINE_AA,
-                    )
+                    put_text(bgr, text, (8, y), place_font, color, place_thick)
             if cad_pose is not None:
                 T_draw = np.asarray(cad_pose["T"], dtype=np.float64)
                 if T_bc is not None:

@@ -59,11 +59,11 @@ from vision.handeye.compute import (
     SAMPLES_DIR,
     list_samples,
 )
+from vision.text import kr_font
 
 XYZ_SPAN_MAX_MM = 2.0
 RPY_SPAN_MAX_DEG = 1.5
 WIN = "hand-eye"
-KR_FONT = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
 PENDANT_OFF_LINES = (
     "펜던트를 먼저 켜세요.",
     "이 창을 끄고 다시 실행하세요.",
@@ -80,37 +80,16 @@ def _quiet_gtk() -> None:
         )
 
 
-_KR_FONT_CACHE: dict[int, object] = {}
-
-
-def _kr_font(size: int):
-    from PIL import ImageFont
-
-    cached = _KR_FONT_CACHE.get(size)
-    if cached is not None:
-        return cached
-    font = None
-    if KR_FONT.is_file():
-        for index in (1, 0):
-            try:
-                font = ImageFont.truetype(str(KR_FONT), size=size, index=index)
-                break
-            except OSError:
-                continue
-    if font is None:
-        font = ImageFont.load_default()
-    _KR_FONT_CACHE[size] = font
-    return font
-
-
 def put_kr_lines(bgr: np.ndarray, lines: list[str], *, origin=(16, 16), size=32) -> np.ndarray:
     """Hangul overlay. Hershey putText cannot draw Korean."""
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     im = Image.fromarray(rgb)
     draw = ImageDraw.Draw(im)
-    font = _kr_font(size)
+    font = kr_font(size)
+    if font is None:
+        font = ImageFont.load_default()
     x, y = origin
     for line in lines:
         draw.text(

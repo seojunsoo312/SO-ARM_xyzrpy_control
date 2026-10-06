@@ -25,6 +25,7 @@ quiet_gtk()
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
+from vision.text import put_text  # noqa: E402
 from yolo.train.boxes import (  # noqa: E402
     LabeledBox,
     aabb_quad,
@@ -120,15 +121,7 @@ class Session:
             color = _CLASS_BGR.get(box.class_id, (0, 255, 0))
             _draw_box(vis, box.quad, color, 2)
             x1, y1, _x2, _y2 = quad_to_xyxy(box.quad)
-            cv2.putText(
-                vis,
-                pose_name(box.class_id, korean=True),
-                (int(x1), max(16, int(y1) - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                1,
-            )
+            put_text(vis, pose_name(box.class_id, korean=True), (int(x1), max(16, int(y1) - 6)), 0.5, color, 1)
 
         if self.pending and self.hover is not None:
             x1, y1 = self.pending[0]
@@ -145,9 +138,7 @@ class Session:
         ]
         y = 22
         for line in lines:
-            cv2.putText(
-                vis, line, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA
-            )
+            put_text(vis, line, (8, y), 0.5, (0, 255, 0), 1)
             y += 20
         return vis
 
