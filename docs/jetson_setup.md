@@ -35,8 +35,11 @@ conda activate AIvision && cd ~/AIvision && python pendant/main.py --grasp
 sudo apt update
 sudo apt install -y git curl build-essential fonts-noto-cjk tk8.6 libtk8.6
 sudo usermod -aG dialout,video $USER     # 시리얼(팔)과 카메라 권한. 다시 로그인해야 적용
-sudo nvpmodel -m 0                       # 최대 성능 모드 (보드에 따라 MAXN / MAXN SUPER)
+grep POWER_MODEL /etc/nvpmodel.conf      # 모드 번호 보기. 이름이 MAXN 으로 시작하는 번호를 쓴다
+sudo nvpmodel -m 2                       # Orin Nano Super 는 2 = MAXN_SUPER (0 은 15W 로 가장 낮다)
 ```
+
+전원 모드 번호는 보드마다 다릅니다. Orin Nano Super는 `0=15W, 1=25W, 2=MAXN_SUPER`라서 `-m 0`을 주면 오히려 가장 느려집니다. `sudo nvpmodel -q`로 지금 모드를 봅니다.
 
 메모리가 8GB라 YOLO 학습 때 모자랄 수 있습니다. 스왑을 8GB 만듭니다.
 
@@ -49,8 +52,9 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 - `build-essential`이 없으면 lerobot 설치 중 `evdev` 빌드에서 멈춥니다(ARM64용 완성본이 없음).
 - `fonts-noto-cjk`가 없으면 펜던트·카메라 창의 한글이 깨집니다.
 - `tk8.6`, `libtk8.6`이 없으면 펜던트 한글이 네모로 나옵니다. 코드는 `/usr/lib/*-linux-gnu/libtk8.6.so`를 찾습니다.
+- Chrome은 `chrome://settings/system`에서 「가능한 경우 그래픽 가속 사용」을 켜고 다시 시작합니다. 꺼져 있으면 WebGL이 없어 Meshcat 3D 화면이 흰색으로만 나옵니다. `chrome://gpu`의 WebGL이 「Hardware accelerated」이면 됩니다.
 
-**확인**: `free -h`에 Swap 8G, `fc-list | grep -c "Noto Sans CJK"`가 0보다 큼.
+**확인**: `sudo nvpmodel -q`가 `MAXN`으로 시작, `free -h`에 Swap 8G 이상(기본 zram 약 3.7G + 스왑 파일 8G), `fc-list | grep -c "Noto Sans CJK"`가 0보다 큼.
 
 ## 3. 프로젝트와 카메라 SDK 놓기
 
@@ -102,22 +106,30 @@ pip install torch==2.8.0 torchvision==0.23.0 --index-url https://pypi.jetson-ai-
 pip install "lerobot[feetech] @ git+https://github.com/seojunsoo312/lerobot.git@f8e76c068ed4058e0504642ff9da8ea226032c54"
 
 # 3) lerobot 이 opencv-python-headless(창 없는 판)를 깐다. 창이 필요하니 바꾼다.
+#    4.12 부터는 numpy 2 를 요구하므로 4.11 로 둔다(5) 참고).
 pip uninstall -y opencv-python-headless opencv-python
-pip install opencv-python
+pip install -c <(printf 'torch==2.8.0\ntorchvision==0.23.0\n') "opencv-python<4.12"
 
-# 4) 나머지. torch 는 이미 있으니 다시 받지 않는다.
-pip install ultralytics open3d pin meshcat customtkinter Pillow jupyter ipykernel
+# 4) 나머지. torch 를 다시 받지 않게 고정한다.
+pip install -c <(printf 'torch==2.8.0\ntorchvision==0.23.0\n') ultralytics open3d pin meshcat customtkinter Pillow jupyter ipykernel
 python -m ipykernel install --user --name AIvision --display-name AIvision
+
+# 5) numpy 를 1.26 으로 내린다. 마지막에 한다.
+pip install numpy==1.26.4
 ```
+
+- 5)가 필요한 이유: Jetson 저장소의 torch 2.8.0 은 NumPy 1.x 로 빌드되어 있습니다. numpy 2 와 함께 쓰면 `torch.from_numpy`, `tensor.numpy()`가 `RuntimeError: Numpy is not available`로 실패하고 YOLO 추론이 멈춥니다. 같은 저장소의 torch 2.9.1, 2.10.0 은 `libcudss.so.0`이 없어 import 되지 않으므로 2.8.0 + numpy 1.26 으로 둡니다.
+- 5) 뒤에 pip 가 `lerobot`, `cmeel-boost`, `rerun-sdk`가 numpy>=2 를 요구한다는 경고를 냅니다. 이 프로젝트가 쓰는 lerobot 모터 연결, pinocchio 기구학, open3d, YOLO 는 numpy 1.26.4 에서 확인했습니다. 무시합니다.
 
 - 3)을 빼면 카메라 창에서 `cv2.imshow` 오류("The function is not implemented")가 납니다.
 - `pip`가 opencv-python-headless가 없다는 경고를 내도 괜찮습니다.
+- `<(printf ...)`는 bash 문법입니다. 제약 파일을 따로 만들지 않고 torch 버전을 고정합니다.
 
 **확인**
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"   # 2.8.0 True
-python -c "import numpy; print(numpy.__version__)"                              # 2.x, 에러 없음
+python -c "import torch, numpy as np; print(np.__version__, torch.from_numpy(np.ones(2)).cuda())"  # 1.26.4, 에러 없음
 python -c "import lerobot.robots.so_follower as m, inspect; print('dof_mode' in inspect.signature(m.SO101FollowerConfig).parameters)"  # True
 python -c "import cv2; cv2.namedWindow('t'); print('cv2 gui ok')"
 python -c "import ultralytics, open3d, pinocchio, coal, meshcat, customtkinter; print('ok')"
@@ -128,6 +140,7 @@ cd ~/AIvision && python -c "from motion import Arm; a = Arm(); print(a.where());
 
 이렇게 나오면:
 
+- `RuntimeError: Numpy is not available` 또는 `A module that was compiled using NumPy 1.x`: numpy 가 2.x 입니다. 5)를 다시 실행합니다.
 - `cuda.is_available()`가 `False`이거나 torch 버전이 2.8.0이 아님: 2)~4)에서 다른 torch가 덮어썼습니다. 1)을 다시 실행합니다.
 - `ImportError: libcusparseLt.so...`: Jetson용 cuSPARSELt를 깔아야 합니다. NVIDIA 포럼의 "PyTorch for JetPack 6" 글 순서를 따릅니다.
 - `libcblas.so.3: undefined symbol: nvpl_blas_core_...`: numpy가 conda 쪽 라이브러리를 물었습니다. 환경을 지우고 5번을 처음부터 합니다. `conda install`은 쓰지 않습니다.
