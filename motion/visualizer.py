@@ -40,6 +40,8 @@ OVERLAY_ROOT = "teach"
 TCP_TRAIL_SEC = 10.0
 TCP_TRAIL_MIN_M = 0.001  # 1 mm
 TCP_TRAIL_COLOR = 0xFB923C
+# 기본 /Axes 를 다시 숨기는 주기. 매 프레임 하면 display 가 5ms 더 걸린다.
+AXES_REHIDE_S = 2.0
 
 # RGB matching meshcat.geometry.triad (X red, Y green, Z blue).
 _AXIS_COLORS = (0xE53935, 0x43A047, 0x1E88E8)
@@ -199,10 +201,18 @@ def _start_meshcat_server(zmq_url=None, server_args=None):
     from meshcat.servers.zmqserver import match_web_url, match_zmq_url
 
     root = _meshcat_viewer_root(PAGE_TITLE)
+    # 부모(펜던트·Arm)가 어떻게 죽든 서버도 따라 끝나게, 부모 pid 를 1초마다 본다.
     code = (
-        "import meshcat.servers.zmqserver as s;"
-        f"s.VIEWER_ROOT={root!r};"
-        "s.main()"
+        "import os, threading, time\n"
+        "_parent = os.getppid()\n"
+        "def _watch_parent():\n"
+        "    while os.getppid() == _parent:\n"
+        "        time.sleep(1.0)\n"
+        "    os._exit(0)\n"
+        "threading.Thread(target=_watch_parent, daemon=True).start()\n"
+        "import meshcat.servers.zmqserver as s\n"
+        f"s.VIEWER_ROOT = {root!r}\n"
+        "s.main()\n"
     )
     args = [sys.executable, "-u", "-c", code]
     if zmq_url is not None:
@@ -270,6 +280,8 @@ class Visualizer:
         self._tcp_trail: deque[tuple[float, np.ndarray]] = deque()
         self._trail_last: np.ndarray | None = None
         self._tcp_trail_on = True
+        self._last_q: np.ndarray | None = None
+        self._axes_hidden_t = time.monotonic()
 
     def _mark_origin(self) -> None:
         """Red sphere at shared URDF / project-base origin (0,0,0)."""
@@ -494,20 +506,26 @@ class Visualizer:
         except Exception:
             pass
 
-    def _update_tcp_trail(self, q: np.ndarray) -> None:
-        """TCP 경로. 점은 10초 뒤 만료되어 선이 사라진다."""
+    def _update_tcp_trail(self, q: np.ndarray, *, moved: bool = True) -> None:
+        """TCP 경로. 점은 10초 뒤 만료되어 선이 사라진다. 바뀐 게 없으면 보내지 않는다."""
         if not self._tcp_trail_on:
             return
         now = time.monotonic()
-        xyz = np.asarray(self._kin.forward_tcp(q).xyz_m, dtype=float).reshape(3)
-        if (
-            self._trail_last is None
-            or float(np.linalg.norm(xyz - self._trail_last)) >= TCP_TRAIL_MIN_M
-        ):
-            self._tcp_trail.append((now, xyz.copy()))
-            self._trail_last = xyz.copy()
+        changed = False
+        if moved or self._trail_last is None:
+            xyz = np.asarray(self._kin.forward_tcp(q).xyz_m, dtype=float).reshape(3)
+            if (
+                self._trail_last is None
+                or float(np.linalg.norm(xyz - self._trail_last)) >= TCP_TRAIL_MIN_M
+            ):
+                self._tcp_trail.append((now, xyz.copy()))
+                self._trail_last = xyz.copy()
+                changed = True
         while self._tcp_trail and now - self._tcp_trail[0][0] > TCP_TRAIL_SEC:
             self._tcp_trail.popleft()
+            changed = True
+        if not changed:
+            return
         node = self._viz.viewer["tcp_trail"]
         if len(self._tcp_trail) < 2:
             if not self._tcp_trail:
@@ -529,9 +547,17 @@ class Visualizer:
         )
 
     def display(self, q: np.ndarray) -> None:
-        self._viz.display(q)
-        self._hide_default_axes()
-        self._update_tcp_trail(q)
+        """펜던트가 33ms 마다 부른다. 자세가 그대로면 Meshcat 에 다시 보내지 않는다."""
+        q = np.asarray(q, dtype=float)
+        moved = self._last_q is None or not np.array_equal(q, self._last_q)
+        if moved:
+            self._viz.display(q)
+            self._last_q = q.copy()
+        now = time.monotonic()
+        if now - self._axes_hidden_t >= AXES_REHIDE_S:
+            self._hide_default_axes()
+            self._axes_hidden_t = now
+        self._update_tcp_trail(q, moved=moved)
 
     def close(self) -> None:
         """Meshcat 서버와 제목이 시뮬레이터인 브라우저 창을 닫는다."""

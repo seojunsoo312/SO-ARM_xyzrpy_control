@@ -46,6 +46,12 @@ from motion.visualizer import Visualizer
 
 DISPLAY_MS = 33
 
+
+def _set_text(widget, text: str) -> None:
+    """글자가 바뀔 때만 configure. CTk 위젯은 configure 마다 다시 그린다."""
+    if widget.cget("text") != text:
+        widget.configure(text=text)
+
 def _joint_ui_name(name: str) -> str:
     """Pendant label: S1–S6 → J1–J6. Gripper stays S7."""
     if name.startswith("S") and name[1:].isdigit() and 1 <= int(name[1:]) <= 6:
@@ -592,8 +598,9 @@ class PendantGui:
         return "base (+X forward)"
 
     def _update_frame_label(self, xyz_frame: str, rot_frame: str) -> None:
-        self.rot_frame_label.configure(
-            text=f"xyz: {self._frame_text(xyz_frame)} · rot: {self._frame_text(rot_frame)}"
+        _set_text(
+            self.rot_frame_label,
+            f"xyz: {self._frame_text(xyz_frame)} · rot: {self._frame_text(rot_frame)}",
         )
 
     def _toggle_connect(self) -> None:
@@ -621,8 +628,8 @@ class PendantGui:
         self._viz.display(st.q)
         xyz = st.pose.xyz_mm
         rpy = st.pose.rpy_deg
-        self.tcp_label.configure(text=f"TCP:  x={xyz[0]:8.2f}  y={xyz[1]:8.2f}  z={xyz[2]:8.2f}  mm")
-        self.rpy_label.configure(text=f"rot:  Rx={rpy[0]:8.2f}  Ry={rpy[1]:8.2f}  Rz={rpy[2]:8.2f}  deg")
+        _set_text(self.tcp_label, f"TCP:  x={xyz[0]:8.2f}  y={xyz[1]:8.2f}  z={xyz[2]:8.2f}  mm")
+        _set_text(self.rpy_label, f"rot:  Rx={rpy[0]:8.2f}  Ry={rpy[1]:8.2f}  Rz={rpy[2]:8.2f}  deg")
         for key, val in (
             ("x", xyz[0]),
             ("y", xyz[1]),
@@ -631,25 +638,24 @@ class PendantGui:
             ("pitch", rpy[1]),
             ("yaw", rpy[2]),
         ):
-            self._tcp_live_labels[key].configure(text=f"{val:7.2f}")
+            _set_text(self._tcp_live_labels[key], f"{val:7.2f}")
         if st.ee_err_mm is None or st.err_xyz_mm is None:
-            self.err_label.configure(text="err:  (virtual)")
+            _set_text(self.err_label, "err:  (virtual)")
         else:
             d = st.err_xyz_mm
-            self.err_label.configure(
-                text=(
-                    f"err:  |Δ|={st.ee_err_mm:7.2f}  "
-                    f"Δx={d[0]:+7.2f}  Δy={d[1]:+7.2f}  Δz={d[2]:+7.2f}  mm"
-                )
+            _set_text(
+                self.err_label,
+                f"err:  |Δ|={st.ee_err_mm:7.2f}  "
+                f"Δx={d[0]:+7.2f}  Δy={d[1]:+7.2f}  Δz={d[2]:+7.2f}  mm",
             )
         torque = "torque on" if st.torque else "torque off"
         if st.connected:
-            self.mode_label.configure(text=f"mode: real · {torque}")
-            self.connect_btn.configure(text="Disconnect")
+            _set_text(self.mode_label, f"mode: real · {torque}")
+            _set_text(self.connect_btn, "Disconnect")
         else:
-            self.mode_label.configure(text="mode: virtual")
+            _set_text(self.mode_label, "mode: virtual")
             if self.connect_btn.cget("state") != "disabled":
-                self.connect_btn.configure(text="Connect")
+                _set_text(self.connect_btn, "Connect")
         self._update_frame_label(st.xyz_frame, st.rot_frame)
         xyz_val = "TCP" if st.xyz_frame == ROT_FRAME_TCP else "base"
         if self._xyz_frame_seg.get() != xyz_val:
@@ -658,11 +664,11 @@ class PendantGui:
         if self._rot_frame_seg.get() != seg_val:
             self._rot_frame_seg.set(seg_val)
             self._apply_rpy_label_colors(st.rot_frame)
-        self.fault_label.configure(text=st.fault)
+        _set_text(self.fault_label, st.fault)
         for name, deg in st.joints_deg.items():
             shown = self._joint_display(name, deg)
             unit = "" if name == GRIPPER_JOINT else "°"
-            self.joint_labels[name].configure(text=f"{shown:7.2f}{unit}")
+            _set_text(self.joint_labels[name], f"{shown:7.2f}{unit}")
         if not self._closed:
             self.root.after(DISPLAY_MS, self._schedule_display)
 
