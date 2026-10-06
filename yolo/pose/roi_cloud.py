@@ -356,6 +356,8 @@ _PAD = 2
 _VOXEL_MM = 1.0
 _OVERLAY_VOXEL_MM = 0.5
 _DEPTH_SPAN_MM = 60.0
+# YOLO 자세가 이 프레임 수만큼 연속으로 달라야 다시 전체 등록한다(약 0.7초).
+_CLASS_CHANGE_FRAMES = 10
 _OUTLIER_STD = 1.5
 _OUTLIER_NB = 20
 
@@ -396,6 +398,13 @@ def main() -> None:
         default=8.0,
         metavar="MM",
         help="점군 중심이 이만큼 움직여야 ICP를 다시 함. 정지 시 축 고정",
+    )
+    parser.add_argument(
+        "--cad-reset-mm",
+        type=float,
+        default=30.0,
+        metavar="MM",
+        help="마지막 전체 등록 자리에서 이만큼 움직이면 추적 대신 처음부터 다시 등록",
     )
     parser.add_argument(
         "--box",
@@ -459,6 +468,11 @@ def main() -> None:
     last_cad_t = 0.0
     last_cad_anchor = None
     cad_full_done = False
+    # 마지막 전체 등록을 보낸 자리와 YOLO 자세. 많이 옮기거나 자세가 바뀌면 다시 전체 등록한다.
+    last_full_anchor = None
+    last_full_class = None
+    # YOLO 자세는 프레임마다 흔들린다. 같은 새 자세가 이만큼 이어져야 바뀐 것으로 본다.
+    class_streak = 0
     pending_req_id: str | None = None
     seen_req_id = read_request()
     if args.cad:
@@ -484,7 +498,8 @@ def main() -> None:
                 "맞으면 축을 고정하고, "
                 f"{args.cad_move_mm:.0f}mm 이상 움직이면 ICP. "
                 "클래스 후보가 모두 실패하면 전체 검색 한 번. "
-                "miss면 멈춤. c 는 처음부터."
+                f"{args.cad_reset_mm:.0f}mm 이상 옮기거나 자세가 바뀌거나 추적이 실패하면 처음부터. "
+                "miss면 옮길 때까지 멈춤. c 는 처음부터."
             )
         else:
             print(
@@ -601,7 +616,11 @@ def main() -> None:
                         if len(last_xyz) >= 20:
                             last_cad_anchor = _median_xyz(last_xyz)
                     elif tracked and cad_pose is not None:
-                        print("CAD 추적 miss. 기존 축 유지. 처음부터는 c.")
+                        # 옛 축을 계속 보이면 물체를 옮긴 뒤에도 옛 자리가 남는다.
+                        cad_pose = None
+                        last_cad_anchor = None
+                        cad_full_done = False
+                        print("CAD 추적 miss. 처음부터 다시 등록합니다.")
                     else:
                         cad_pose = None
                         last_cad_anchor = None
@@ -623,10 +642,25 @@ def main() -> None:
                 now = time.monotonic()
                 due = (now - last_cad_t) >= max(0.2, float(args.cad_every))
                 pose_ok = cad_pose is not None and cad_pose.get("aligned_ok", False)
+                if (
+                    cad_class_id is not None
+                    and last_full_class is not None
+                    and cad_class_id != last_full_class
+                ):
+                    class_streak += 1
+                else:
+                    class_streak = 0
                 if len(last_xyz) >= 20 and due:
                     desk = _work_desk_plane(plane, T_bc)
-                    if pose_ok:
-                        anchor = _median_xyz(last_xyz)
+                    anchor = _median_xyz(last_xyz)
+                    far = last_full_anchor is not None and float(
+                        np.linalg.norm(anchor - last_full_anchor)
+                    ) >= max(1.0, float(args.cad_reset_mm))
+                    class_changed = class_streak >= _CLASS_CHANGE_FRAMES
+                    full = False
+                    if pose_ok and (far or class_changed):
+                        full = True
+                    elif pose_ok:
                         moved = (
                             last_cad_anchor is None
                             or float(np.linalg.norm(anchor - last_cad_anchor))
@@ -639,7 +673,10 @@ def main() -> None:
                             desk_plane=desk,
                         ):
                             last_cad_t = now
-                    elif not cad_full_done and cad_worker.submit(
+                    else:
+                        # 실패한 자리에서는 반복하지 않고, 옮기거나 자세가 바뀌면 다시 해 본다.
+                        full = not cad_full_done or far or class_changed
+                    if full and cad_worker.submit(
                         last_xyz,
                         T_init=None,
                         T_prev=None,
@@ -648,6 +685,13 @@ def main() -> None:
                     ):
                         last_cad_t = now
                         cad_full_done = True
+                        last_full_anchor = anchor
+                        last_full_class = cad_class_id
+                        class_streak = 0
+                        if far:
+                            print("CAD 물체를 옮김. 처음부터 다시 등록")
+                        elif class_changed:
+                            print("CAD 자세가 바뀜. 처음부터 다시 등록")
 
             for i, inst in enumerate(instances):
                 x1, y1, x2, y2 = [int(v) for v in inst.xyxy[:4]]
@@ -791,6 +835,8 @@ def main() -> None:
                     last_cad_t = time.monotonic()
                     last_cad_anchor = None
                     cad_full_done = True
+                    last_full_anchor = _median_xyz(last_xyz)
+                    last_full_class = cad_class_id
                     if req_id is not None:
                         pending_req_id = req_id
                         write_status(req_id, "run")
