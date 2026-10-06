@@ -91,6 +91,10 @@ def load_ply_xyz(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
     return xyz, rgb
 
 
+# CAD 표면 샘플 수 = (면적 / voxel²) × 이 배수. 8 이면 1mm voxel 이 거의 다 찬다.
+_CAD_OVERSAMPLE = 8
+
+
 def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarray:
     """CAD ply/mesh → mm 점군. model.yaml mesh 면 mesh_rpy 적용."""
     o3d = _require_o3d()
@@ -111,7 +115,15 @@ def load_cad_xyz(path: Path | None = None, *, voxel_mm: float = 2.0) -> np.ndarr
         mesh.vertices = o3d.utility.Vector3dVector(verts)
         mesh.compute_vertex_normals()
         area = float(mesh.get_surface_area())
-        n_sample = int(np.clip(area / max(voxel_mm ** 2, 1e-6), 800, 80000))
+        # 무작위 표면 샘플이라 실행마다 CAD 점군이 달라 등록 성공이 갈렸다(약 4% 실패).
+        # 넉넉히 뽑은 뒤 voxel 로 줄이면 격자마다 평균이 거의 같아져 샘플 운이 사라진다.
+        n_sample = int(
+            np.clip(
+                area / max(voxel_mm ** 2, 1e-6) * _CAD_OVERSAMPLE,
+                800,
+                80000 * _CAD_OVERSAMPLE,
+            )
+        )
         try:
             pcd = mesh.sample_points_uniformly(number_of_points=n_sample)
         except RuntimeError:
@@ -909,6 +921,9 @@ def stabilize_T(
     return best
 
 
+# stabilize_T 로 돌린 결과가 이만큼(겹침 비율) 덜 맞으면 돌리지 않는다.
+_STABILIZE_TOL_FRAC = 0.02
+
 CLASS_YAW_STEP_DEG = 30.0
 CLASS_SNAP_MAX_DEG = 2.0
 _CLASS_FULL_KEEP = 3
@@ -1168,11 +1183,19 @@ def register_pose(
         T = _apply_gravity(
             T, cad_xyz=cad_xyz, up=up, desk_plane=desk_plane, soft=soft
         )
-    T = stabilize_T(T, T_prev, pivot=np.median(cad_xyz, axis=0))
+    T_fit = T
+    T = stabilize_T(T_fit, T_prev, pivot=np.median(cad_xyz, axis=0))
     if T_base_cam is None:
         cov = pose_coverage(
             cad_xyz, scene_xyz, T, thresh_mm=3.0, camera_origin=cam
         )
+        if not np.array_equal(T, T_fit):
+            # 180° 맞추기가 맞는 답을 다른 대칭 계열에서 망가뜨릴 수 있다. 덜 맞으면 버린다.
+            cov_fit = pose_coverage(
+                cad_xyz, scene_xyz, T_fit, thresh_mm=3.0, camera_origin=cam
+            )
+            if cov_fit["frac"] > cov["frac"] + _STABILIZE_TOL_FRAC:
+                T, cov = T_fit, cov_fit
         raw["fitness"] = cov["frac"]
         raw["inlier_rmse"] = cov["median"]
         raw["scene_frac"] = cov["frac"]
