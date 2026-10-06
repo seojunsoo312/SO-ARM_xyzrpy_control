@@ -194,6 +194,20 @@ ls -l /dev/so101_*
 - 「물체 위치 불러오기」가 30초 안에 끝나는지. 넘으면 「카메라 창이 응답하지 않습니다」가 납니다(`yolo/pose/register_link.py`의 `REG_JOB_S`).
 - 실행한 폴더에 `Log/`가 생기지 않는지.
 
+마스터(Orin Nano Super, MAXN_SUPER)에서 잰 값입니다. 수업 준비의 기준으로 씁니다.
+
+| 항목 | 값 |
+|---|---|
+| 카메라 창 + 펜던트 + 브라우저 + 노트북 | RAM 최대 5.7GB, 스왑 0.2GB |
+| 「물체 위치 불러오기」 | 3~5초 |
+| 학습 (사진 280장, 50 epoch, batch 4, workers 2) | 약 12분, RAM 최대 6.3GB |
+
+학습할 때:
+
+- 카메라 창, 브라우저, 노트북을 끄고 학습만 돌립니다. 학습만으로 RAM을 6GB 넘게 씁니다.
+- 학습 중 화면 위에 「System throttled due to Over-current」가 뜰 수 있습니다. 전류 한도에서 보드가 클럭을 낮추는 보호 동작이라 학습은 그대로 끝납니다.
+- 사진은 세 자세(세우기·눕히기·비스듬히)를 비슷한 수로, 작업대 가장자리와 여러 방향을 섞어 찍습니다. 한 자세가 적거나 한 자리에서만 찍으면 그 자세·자리에서 카메라 창이 물체를 놓칩니다.
+
 ## 8. 나머지 보드에 복제
 
 마스터의 디스크를 이미지로 떠서 다른 보드에 씁니다. 한 대씩 설치하는 것보다 빠르고, 모든 보드가 같은 환경이 됩니다.
@@ -217,3 +231,5 @@ cd ~/AIvision && git pull
 
 - lerobot fork를 바꾸면 `docs/requirements.txt`와 이 문서의 커밋 번호를 바꾸고, 보드마다 5번 2)를 새 번호로 다시 실행합니다.
 - `yolo/weights/`는 git에 없으므로 바꿀 때는 USB로 복사합니다.
+- 카메라 캘리브(`vision/calib_data/`)와 필터 값(`vision/orbbec_filters.json`)도 보드마다 다르므로 git에 없습니다. 필터 파일이 없으면 git의 `vision/orbbec_filters.default.json`에서 시작합니다.
+- 이 파일들이 아직 git에 들어 있던 때 받은 보드는, 그 뒤 처음 `git pull`할 때 캘리브 파일이 지워질 수 있습니다. 그 전에 `cp -r vision/calib_data ~/calib_backup`으로 옮겨 두었다가 pull 뒤에 되돌립니다.
