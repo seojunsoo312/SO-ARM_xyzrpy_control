@@ -10,11 +10,17 @@ yolo/datasets/
 yolo/weights/
 yolo/runs/
 yolo/*.pt
+# prepare.py rewrites `path:` with this machine's folder on every run.
+yolo/data.yaml
+# ultralytics downloads start/AMP-check weights into the folder it runs from.
+/*.pt
+/weights/
 
-# Vision capture dumps (keep json calib results)
-vision/calib_data/**/*.png
-vision/calib_data/**/*.jpg
-vision/calib_data/**/*.jpeg
+# Per-board camera state: calibration and filter values differ on every board,
+# and tracking them makes `git pull` fail once a board writes its own.
+vision/calib_data/**
+!vision/calib_data/.gitkeep
+vision/orbbec_filters.json
 
 # Point clouds / local dumps
 **/*.ply

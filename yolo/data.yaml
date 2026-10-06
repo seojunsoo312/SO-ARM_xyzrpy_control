@@ -1,4 +1,4 @@
-path: /home/junsoo/Project/yolo
+path: /home/dev/AIvision/yolo
 train: datasets/splits/train.txt
 val: datasets/splits/val.txt
 nc: 3

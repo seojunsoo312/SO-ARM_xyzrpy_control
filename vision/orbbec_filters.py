@@ -17,7 +17,9 @@ from vision.text import put_text
 FILTER_WIN = "Orbbec filters"
 NOISE_MIN_DIFF_DEFAULT = 10000
 NOISE_MAX_SIZE_DEFAULT = 1
+# 보드마다 바뀌는 값(git 에 없음). 없으면 git 에 있는 기본값에서 시작한다.
 FILTER_STATE_PATH = Path(__file__).resolve().parent / "orbbec_filters.json"
+FILTER_DEFAULT_PATH = Path(__file__).resolve().parent / "orbbec_filters.default.json"
 
 _BOOL_KEYS = ("noise", "hole", "holefill", "temporal")
 _OPTIONAL_BOOL_KEYS = ("color_ae", "ae")
@@ -119,11 +121,12 @@ class OrbbecFilterPanel:
         cv2.setMouseCallback(FILTER_WIN, self._on_mouse)
         self.sync(force=True)
         if restored:
-            print(f"{FILTER_WIN}: 이전 설정 복원 → {FILTER_STATE_PATH.name}")
+            src = FILTER_STATE_PATH if FILTER_STATE_PATH.is_file() else FILTER_DEFAULT_PATH
+            print(f"{FILTER_WIN}: 이전 설정 복원 → {src.name}")
         print(f"{FILTER_WIN}: 클릭 ON/OFF, 슬라이더 드래그 (종료 시 저장)")
 
     def _apply_saved_state(self) -> bool:
-        saved = _load_filter_state()
+        saved = _load_filter_state() or _load_filter_state(FILTER_DEFAULT_PATH)
         if not saved:
             return False
         v = self.v

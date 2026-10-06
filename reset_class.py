@@ -26,15 +26,18 @@ SKIP_DIR_NAMES = {".git", ".venv", "venv", "node_modules"}
 
 
 def _restore_data_yaml() -> None:
+    """prepare.py 와 같은 모양. 클래스 목록은 yolo/config.py 가 정본이다."""
+    if str(PROJECT) not in sys.path:
+        sys.path.insert(0, str(PROJECT))
+    from yolo.config import pose_names_yaml
+
     dest = YOLO / "data.yaml"
     root = YOLO.resolve()
     dest.write_text(
         f"path: {root.as_posix()}\n"
         "train: datasets/splits/train.txt\n"
         "val: datasets/splits/val.txt\n"
-        "nc: 1\n"
-        "names:\n"
-        "  0: bracket\n",
+        f"{pose_names_yaml()}",
         encoding="utf-8",
     )
 
