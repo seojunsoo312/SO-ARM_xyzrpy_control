@@ -78,7 +78,10 @@ SPLIT_SEED = 42
 TRAIN_IMGSZ = 640
 TRAIN_BATCH = 4
 TRAIN_EPOCHS = 50
-TRAIN_WORKERS = 0  # Jetson 공유메모리. PC면 2~4
+# 0 이면 CPU 한 코어가 사진 준비를 혼자 해 GPU 가 절반을 논다. Orin Nano Super 실측(280장):
+# workers 0 → 20.1s/epoch, workers 2 → 14.6s/epoch, RAM 최대 6.3GB. batch 8 은 2.4배 빠르지만
+# RAM 6.8GB·스왑 1.2GB 에 과전류 스로틀이 계속 걸려 4 로 둔다.
+TRAIN_WORKERS = 2
 DETECT_CONF = 0.5
 
 

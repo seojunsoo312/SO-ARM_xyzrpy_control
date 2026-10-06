@@ -88,7 +88,7 @@ def main() -> None:
         project=str(RUNS_DIR),
         name=run_name,
         exist_ok=True,
-        cache=False,
+        cache="ram",  # 사진 수백 장이면 0.2GB 남짓. 매 epoch JPEG 를 다시 풀지 않는다.
         patience=30,
         plots=True,
     )
