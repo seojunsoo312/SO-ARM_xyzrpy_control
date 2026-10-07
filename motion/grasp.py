@@ -50,12 +50,14 @@ from motion.robot_kinematics import (
     rpy_deg_to_rotmat,
 )
 
-# Random place (project base mm): polar sector ∩ box ∩ r ring ∩ height, mesh above floor.
+# Random place (project base mm): front half ring ∩ height, mesh above floor.
 # x=r·cosθ, y=r·sinθ; θ ∈ (−90°, 90°) → x > 0 (전진) half-plane.
-# r_min: INIT 팔과 AABB 겹침 회피. r_max: 먼 코너 IK (r≳271 mm) 회피. 박스는 유지.
-RANDOM_XY_ABS_MAX_MM = 200.0
+# 팔이 닿는 범위는 베이스 중심의 고리라 사각형으로 자르지 않는다. 작업면 z=0 에서
+# 눕힌 브라켓을 모든 방향으로 수직 집기 되는 반경은 각도와 거의 무관하게 약 95~250 mm
+# (2026-10-07 시뮬레이션). 실기는 캘리브 뒤 물체가 조금 낮게 잡혀 더 멀리 닿는다.
+# r_min: INIT 팔과 AABB 겹침 회피.
 RANDOM_R_MIN_MM = 120.0  # r > 120 mm
-RANDOM_R_MAX_MM = 270.0  # r < 270 mm (cuts |x|≈|y|≈200 corners, keeps (200, 0))
+RANDOM_R_MAX_MM = 250.0  # r < 250 mm
 RANDOM_R2_MIN_MM2 = RANDOM_R_MIN_MM * RANDOM_R_MIN_MM
 RANDOM_R2_MAX_MM2 = RANDOM_R_MAX_MM * RANDOM_R_MAX_MM
 RANDOM_THETA_MIN_DEG = -90.0
@@ -305,23 +307,35 @@ def _rot_from_pitch_roll(y_hat: np.ndarray, x_raw: np.ndarray) -> np.ndarray:
     return np.column_stack([x, y, z])
 
 
+# 모든 후보가 도달 검사에서 떨어졌을 때 고르는 비용: 자세 오차(deg)
+# + 위치 오차(mm) × 이 값 + |ΔS6|(deg) × 가중치. 1mm 를 자세 5° 쯤으로 본다.
+FALLBACK_MM_PER_DEG = 5.0
+FALLBACK_S6_DEG_WEIGHT = 0.01
+
+
 def _pre_ik_ok(kin, q0: np.ndarray, xyz_urdf: np.ndarray, R_urdf: np.ndarray) -> bool:
     return _pre_ik_s6(kin, q0, xyz_urdf, R_urdf) is not None
 
 
-def _pre_ik_s6(kin, q0: np.ndarray, xyz_urdf: np.ndarray, R_urdf: np.ndarray) -> float | None:
-    """Return reached S6 (user deg) if pose is reachable within S6 soft limits."""
+def _pre_ik_eval(
+    kin, q0: np.ndarray, xyz_urdf: np.ndarray, R_urdf: np.ndarray
+) -> tuple[float, float, float, bool]:
+    """IK from q0 toward the pose. Returns (S6 user deg, pos err m, rot err rad, S6 in limits)."""
     q = np.asarray(q0, dtype=float).copy()
     for _ in range(60):
         q = kin.servo_toward(q, xyz_urdf, R_ref=R_urdf, ori_weight=1.0)
     s6 = float(kin.joints_deg(q)["S6"])
     lo, hi = JOINT_LIMIT_USER_DEG["S6"]
-    if s6 < lo - 0.5 or s6 > hi + 0.5:
-        return None
     pose = kin.forward_tcp(q)
     err_p = float(np.linalg.norm(pose.xyz_m - np.asarray(xyz_urdf, dtype=float)))
     err_r = float(np.linalg.norm(pin.log3(np.asarray(R_urdf) @ pose.rotation.T)))
-    if err_p >= 0.0015 or err_r >= 0.12:
+    return s6, err_p, err_r, lo - 0.5 <= s6 <= hi + 0.5
+
+
+def _pre_ik_s6(kin, q0: np.ndarray, xyz_urdf: np.ndarray, R_urdf: np.ndarray) -> float | None:
+    """Return reached S6 (user deg) if pose is reachable within S6 soft limits."""
+    s6, err_p, err_r, s6_ok = _pre_ik_eval(kin, q0, xyz_urdf, R_urdf)
+    if not s6_ok or err_p >= 0.0015 or err_r >= 0.12:
         return None
     return s6
 
@@ -381,7 +395,27 @@ def _pick_tcp_rot(
         best = _best_for_flip(True)
     if best is not None:
         return best[1], best[2]
-    return _rot_from_pitch_roll(pitch0, rolls[0]), False
+    # Nothing is fully reachable (near full reach / below the base). Do not fall
+    # back to rolls[0] blindly: it can need a half turn of S6, saturate it, and
+    # bend the wrist into L4. Take the pitch+ roll that gets closest instead.
+    fallback: tuple[float, np.ndarray] | None = None
+    for roll in rolls:
+        R_try = _rot_from_pitch_roll(pitch0, roll)
+        T = np.eye(4)
+        T[:3, :3] = R_try
+        T[:3, 3] = p_base
+        xyz_mm, rpy = T_to_xyzrpy(T)
+        xyz_u, R_u = ee_target_urdf_from_user(xyz_mm, rpy)
+        s6, err_p, err_r, _s6_ok = _pre_ik_eval(kin, q, xyz_u, R_u)
+        cost = (
+            np.degrees(err_r)
+            + FALLBACK_MM_PER_DEG * err_p * 1000.0
+            + FALLBACK_S6_DEG_WEIGHT * abs(s6 - s6_now)
+        )
+        if fallback is None or cost < fallback[0]:
+            fallback = (cost, R_try)
+    assert fallback is not None
+    return fallback[1], False
 
 
 def _approach_point_cad_mm(
@@ -631,20 +665,11 @@ def _theta_in_sector(theta_deg: float) -> bool:
 
 
 def _r_max_for_theta_mm(theta_rad: float) -> float:
-    """Largest r with |r cosθ|<200, |r sinθ|<200, and r < RANDOM_R_MAX_MM."""
-    c = abs(float(np.cos(theta_rad)))
-    s = abs(float(np.sin(theta_rad)))
-    lim = float(RANDOM_R_MAX_MM) - 1e-3
-    if c > 1e-12:
-        lim = min(lim, (RANDOM_XY_ABS_MAX_MM - 1e-3) / c)
-    if s > 1e-12:
-        lim = min(lim, (RANDOM_XY_ABS_MAX_MM - 1e-3) / s)
-    return float(lim)
+    """Largest r < RANDOM_R_MAX_MM at θ (the ring is the same in every direction)."""
+    return float(RANDOM_R_MAX_MM) - 1e-3
 
 
 def _place_xy_in_region(x: float, y: float) -> bool:
-    if abs(x) >= RANDOM_XY_ABS_MAX_MM or abs(y) >= RANDOM_XY_ABS_MAX_MM:
-        return False
     r2 = x * x + y * y
     if r2 <= RANDOM_R2_MIN_MM2 or r2 >= RANDOM_R2_MAX_MM2:
         return False
@@ -706,7 +731,7 @@ def _mesh_above_floor(verts_cad_m: np.ndarray, place: PlacePose) -> bool:
 
 
 def _sample_xy_mm(rng: np.random.Generator) -> tuple[float, float] | None:
-    """One (x,y) in S1 sector ∩ |x|,|y|<200 ∩ (RANDOM_R_MIN_MM, RANDOM_R_MAX_MM). None if impossible."""
+    """One (x,y) in S1 sector ∩ (RANDOM_R_MIN_MM, RANDOM_R_MAX_MM). None if impossible."""
     r_min = float(RANDOM_R_MIN_MM) + 1e-3
     theta_deg = float(rng.uniform(RANDOM_THETA_MIN_DEG + 1e-3, RANDOM_THETA_MAX_DEG - 1e-3))
     theta = np.deg2rad(theta_deg)

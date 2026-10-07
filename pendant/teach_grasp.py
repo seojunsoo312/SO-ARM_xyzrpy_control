@@ -80,9 +80,10 @@ APPROACH_OTHER_COLOR = 0xC2410C
 DISPLAY_MS = 33
 RPY_SLIDER_MIN = -180.0
 RPY_SLIDER_MAX = 180.0
-# Place XYZ sliders (project base mm); match random-place workspace box.
-PLACE_XY_SLIDER_MIN = -200.0
-PLACE_XY_SLIDER_MAX = 200.0
+# Place XYZ sliders (project base mm). XY reaches past the random-place ring
+# (r < RANDOM_R_MAX_MM, motion/grasp.py) so edge cases near full reach can be tried.
+PLACE_XY_SLIDER_MIN = -300.0
+PLACE_XY_SLIDER_MAX = 300.0
 PLACE_Z_SLIDER_MIN = 0.0
 PLACE_Z_SLIDER_MAX = 40.0
 RPY_LIVE_APPLY_MS = 40
